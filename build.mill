@@ -1,0 +1,51 @@
+package build
+
+import mill.*, scalalib.*
+
+/** OpenJFX publishes its real jars — classes and natives — under a per-platform classifier; the bare artifact is an empty 302-byte stub.
+  */
+val javafxClassifier: String =
+  val os = sys.props("os.name").toLowerCase
+  val arch = sys.props("os.arch").toLowerCase
+  if os.contains("mac") && (arch.contains("aarch64") || arch.contains("arm64")) then "mac-aarch64"
+  else if os.contains("mac") then "mac"
+  else if os.contains("win") then "win"
+  else if arch.contains("aarch64") then "linux-aarch64"
+  else "linux"
+
+/** ScalaFX's POM pulls in every OpenJFX module — fxml/media/swing/web plus `jdk-jsobject`, ~38 MB of natives this app never touches — and
+  * repeats the bare stubs those modules' own POMs declare. The three modules we use are added explicitly with the classifier instead. Mill
+  * parses one exclusion per `;exclude=` segment; a comma-separated list is silently read as a single bogus exclusion, so each one needs its
+  * own segment.
+  */
+val noTransitiveOpenJfx: String = "exclude=org.openjfx:*"
+
+/** Scala 3.10's stdlib lives in `scala-library`, which Mill adds as a mandatory dep; the transitive `scala3-library_3:3.3.8` is a stale
+  * duplicate of it on the run classpath.
+  */
+val noTransitiveScala3Library: String = "exclude=org.scala-lang:scala3-library_3"
+
+object app extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def mainClass = Some("corvi.Main")
+
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement"
+  )
+
+  def mvnDeps = Task {
+    val fx = "26"
+    Seq(
+      mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library",
+      mvn"com.softwaremill.ox::core:1.0.9;$noTransitiveScala3Library",
+      mvn"ch.qos.logback:logback-classic:1.6.5",
+      mvn"com.techsenger.jeditermfx:jeditermfx-core:1.1.0;$noTransitiveOpenJfx",
+      mvn"com.techsenger.jeditermfx:jeditermfx-ui:1.1.0;$noTransitiveOpenJfx",
+      mvn"org.jetbrains.pty4j:pty4j:0.14.0"
+    ) ++ Seq("base", "graphics", "controls")
+      // The classifier jar replaces the stub for the module itself; the exclusion drops the bare
+      // stubs each OpenJFX POM repeats for its siblings.
+      .map(m => mvn"org.openjfx:javafx-$m:$fx;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }
