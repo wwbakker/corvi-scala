@@ -47,6 +47,11 @@ private[corvi] final class TerminalSession(
   /** The connection to the shell, for the checks that need to type at it. */
   def tty: TtyConnector = widget.getTtyConnector
 
+  /** Puts the keyboard in the terminal — what selecting its window does. The canvas is the node the widget gives focus to when the user
+    * clicks the terminal, so it is the node to focus here too. FX-thread-only.
+    */
+  def requestFocus(): Unit = widget.getTerminalPanel.getCanvas.requestFocus()
+
   def isAlive: Boolean = process.isAlive
 
   /** Ends the session: the emulator is stopped, the shell killed, and the ox scope signalled so its thread finishes. Idempotent, and safe

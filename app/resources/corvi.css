@@ -133,6 +133,15 @@
     -fx-font-size: 12px;
 }
 
+/* A window whose shell has stopped is quieter than a running one — but only while it is neither
+   current nor hovered. JavaFX has no `:not()`, so the cascade says it: this rule sits between the
+   plain one above and the two below, which is what keeps a current ended tab's label
+   `-fx-corvi-on-accent` and a hovered one `-fx-corvi-text`. The icon keeps the state's own colour
+   (red) either way, as it does on any tab. */
+.window-tab.ended .label {
+    -fx-text-fill: -fx-corvi-faint;
+}
+
 .window-tab:hover .label {
     -fx-text-fill: -fx-corvi-text;
 }
@@ -165,12 +174,14 @@
     -fx-stroke-line-join: round;
 }
 
-.tab-icon.working {
-    -fx-stroke: -fx-corvi-ok;
-}
-
 .tab-icon.idle {
     -fx-stroke: -fx-corvi-faint;
+}
+
+/* The shell has stopped: the palette has no separate "dead" tone, and `--error` is the one that
+   reads as "this window is not running any more". */
+.tab-icon.ended {
+    -fx-stroke: -fx-corvi-error;
 }
 
 /* The 6 px dot for output that arrived in a window you were not looking at. */

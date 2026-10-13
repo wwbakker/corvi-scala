@@ -54,6 +54,8 @@ private[corvi] object SnapshotMain extends JFXApp3:
     timer.start()
 
   private def write(shell: CorviShell, window: Scene): Unit =
+    val focusOwner = Option(window.getFocusOwner).map(owner => owner.getClass.getSimpleName).getOrElse("none")
+    println(s"the keyboard is in: $focusOwner")
     val buffered = toBufferedImage(window.snapshot(null))
     // Same order the app quits in: the shell is stopped before the process goes, so a harness that
     // exits with System.exit cannot leave one behind either.

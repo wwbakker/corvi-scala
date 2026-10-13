@@ -1,13 +1,12 @@
 package corvi.terminal
 
 import java.io.IOException
-import corvi.{AppWindow, CorviShell}
-import java.nio.file.Paths
-import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import corvi.{AppWindow, CorviShell, FxProbe, LiveProcesses}
 import javafx.application.Platform
+import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.stage.WindowEvent
-import scala.jdk.CollectionConverters.*
 import scalafx.application.JFXApp3
 import scalafx.scene.Scene
 import scalafx.scene.layout.StackPane
@@ -54,7 +53,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     val cwd = Paths.get(sys.props("user.dir"))
     val reads = new AtomicInteger(0)
     val exited = new CountDownLatch(1)
-    val session = onFx(
+    val session = FxProbe.onFx(
       TerminalSession.open(
         id = 0,
         label = "probe",
@@ -65,9 +64,9 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     )
     println(s"session ${session.id} (${session.label}) in $cwd, shell pid ${session.pid}")
 
-    val window = onFx(windowFor(session))
+    val window = FxProbe.onFx(windowFor(session))
     try
-      val mounted = awaitTrue(onFx(mountedInWindow(session, window)), 10)
+      val mounted = FxProbe.awaitTrue(FxProbe.onFx(mountedInWindow(session, window)), 10)
       report("the session's pane is the widget's own pane, mounted in the window", mounted, paneDetail(session, window))
 
       val prompt = await(session, _.trim.nonEmpty, timeoutSeconds)
@@ -97,7 +96,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
 
       // Busy the FX thread first: the fork's `onExited` then has to sit queued while the session's
       // scope tears itself down, which is exactly the race that used to swallow a natural exit.
-      occupyFxThread(2)
+      FxProbe.occupyFxThread(2)
       typeOn(session, "exit")
       val ended = exited.await(timeoutSeconds, TimeUnit.SECONDS)
       report("exit ended the shell and fired onExited with the FX thread busy", ended && !session.isAlive, "")
@@ -108,13 +107,13 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
         println(s"FAIL  the probe threw: $failure")
     finally
       // Whatever happened above, nothing of ours outlives the probe.
-      if session.isAlive then onFx(session.close())
+      if session.isAlive then FxProbe.onFx(session.close())
 
     // Teardown, the way the app's quit handler does it: on the FX thread, and finished before the
     // toolkit goes. A shell that is still there, or an emulator thread still running, is a leak
     // rather than a timing detail.
     val secondExits = new CountDownLatch(1)
-    val second = onFx(
+    val second = FxProbe.onFx(
       TerminalSession.open(
         id = 1,
         label = "probe-close",
@@ -126,29 +125,37 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     val secondPrompt = await(second, _.trim.nonEmpty, timeoutSeconds)
     report("a second session spawned for the teardown check", secondPrompt.isDefined, secondPrompt.getOrElse(""))
 
-    onFx(second.close())
-    val shellGone = awaitTrue(!processAlive(second.pid), 5)
+    FxProbe.onFx(second.close())
+    val shellGone = FxProbe.awaitTrue(!LiveProcesses.alive(second.pid), 5)
     report("close() killed the shell", shellGone, s"shell pid ${second.pid} no longer alive: $shellGone")
     val noExit = !secondExits.await(2, TimeUnit.SECONDS)
     report("close() did not report an exit", noExit, "")
-    val threadsGone = awaitTrue(sessionThreads.isEmpty, 10)
-    report("no TerminalEmulator/JediTermFX thread left behind", threadsGone, if threadsGone then "none" else sessionThreads.mkString(", "))
+    val threadsGone = FxProbe.awaitTrue(LiveProcesses.sessionThreads.isEmpty, 10)
+    report(
+      "no TerminalEmulator/JediTermFX thread left behind",
+      threadsGone,
+      if threadsGone then "none" else LiveProcesses.sessionThreads.mkString(", ")
+    )
 
     // Negative control for the leak check above: a session that is deliberately left running still
     // shows its own threads, so a "none left behind" result means something. It is closed straight
     // after, so the probe still leaves nothing.
-    val control = onFx(
+    val control = FxProbe.onFx(
       TerminalSession.open(id = 2, label = "probe-control", cwd = cwd, onOutput = _ => (), onExited = _ => ())
     )
     val controlPrompt = await(control, _.trim.nonEmpty, timeoutSeconds)
     report("a third session spawned for the leak control", controlPrompt.isDefined, controlPrompt.getOrElse(""))
-    val controlSeen = awaitTrue(emulatorThreads.nonEmpty, 10)
-    report("the leak check sees a live session's emulator thread", controlSeen, emulatorThreads.mkString(", "))
-    onFx(control.close())
-    val controlGone = awaitTrue(sessionThreads.isEmpty, 10)
-    report("and sees them go once the session is closed", controlGone, if controlGone then "none" else sessionThreads.mkString(", "))
+    val controlSeen = FxProbe.awaitTrue(LiveProcesses.emulatorThreads.nonEmpty, 10)
+    report("the leak check sees a live session's emulator thread", controlSeen, LiveProcesses.emulatorThreads.mkString(", "))
+    FxProbe.onFx(control.close())
+    val controlGone = FxProbe.awaitTrue(LiveProcesses.sessionThreads.isEmpty, 10)
+    report(
+      "and sees them go once the session is closed",
+      controlGone,
+      if controlGone then "none" else LiveProcesses.sessionThreads.mkString(", ")
+    )
 
-    onFx(window.stage.close())
+    FxProbe.onFx(window.stage.close())
 
     // The app's quit, in full: a real close request on a window built and wired exactly as `Main`
     // builds it, so the handler under test is `AppWindow.quit` itself. `Platform.exit()` ends this
@@ -156,21 +163,21 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     // toolkit — so the checks that must look *after* the quit are a shutdown hook, which still gets
     // to look and to say so before the process goes. Everything in there is plain Java: the toolkit
     // is gone by design, which is the point of the fix.
-    val app = onFx(appWindow())
-    val appShells = awaitTrue(childShells.nonEmpty, 15)
-    report("the app's shell is running under this JVM", appShells, childShells.map(_.pid.toString).mkString(", "))
+    val app = FxProbe.onFx(appWindow())
+    val appShells = FxProbe.awaitTrue(LiveProcesses.childShells.nonEmpty, 15)
+    report("the app's shell is running under this JVM", appShells, LiveProcesses.childShells.map(_.pid.toString).mkString(", "))
     val _ = Runtime.getRuntime.addShutdownHook(
       Thread
         .ofPlatform()
         .name("corvi-quit-check")
         .unstarted(() =>
-          val shellsGone = awaitTrue(childShells.isEmpty, 5)
-          val threadsGone = awaitTrue(sessionThreads.isEmpty, 5)
-          report("the app's quit left no shell behind", shellsGone, childShells.map(_.pid.toString).mkString(", "))
+          val shellsGone = FxProbe.awaitTrue(LiveProcesses.childShells.isEmpty, 5)
+          val threadsGone = FxProbe.awaitTrue(LiveProcesses.sessionThreads.isEmpty, 5)
+          report("the app's quit left no shell behind", shellsGone, LiveProcesses.childShells.map(_.pid.toString).mkString(", "))
           report(
             "the app's quit left no TerminalEmulator/JediTermFX thread behind",
             threadsGone,
-            if threadsGone then "none" else sessionThreads.mkString(", ")
+            if threadsGone then "none" else LiveProcesses.sessionThreads.mkString(", ")
           )
           println(if failures == 0 then "all PTY checks passed" else s"$failures PTY check(s) failed")
           // System.exit is not available from a shutdown hook; halt is, and it is the only way these
@@ -179,7 +186,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
         )
     )
     println("firing the close request; the app's quit is expected to end this process on its own")
-    onFx(fireCloseRequest(app))
+    FxProbe.onFx(fireCloseRequest(app))
     // If the quit does not end the JVM, say so rather than hanging the command.
     Thread.sleep(10_000)
     println("FAIL  the app's quit did not end this JVM")
@@ -196,13 +203,6 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
   private def fireCloseRequest(stage: Stage): Unit =
     val _ = stage.delegate.fireEvent(new WindowEvent(stage.delegate, WindowEvent.WINDOW_CLOSE_REQUEST))
 
-  /** The shells this JVM still has as children, as the OS sees them — the orphan check `pgrep -f` would do, scoped to us so the user's own
-    * shells are not counted.
-    */
-  private def childShells: Seq[ProcessHandle] =
-    val shell = Paths.get(Option(System.getenv("SHELL")).filter(_.nonEmpty).getOrElse("/bin/sh")).getFileName.toString
-    ProcessHandle.current.descendants.iterator.asScala.toSeq.filter(_.info.commandLine.orElse("").contains(shell))
-
   /** A window around the session's pane. */
   private def windowFor(session: TerminalSession): ProbeWindow =
     val content = new StackPane:
@@ -216,7 +216,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     ProbeWindow(stage, content)
 
   private def resizeWindow(window: ProbeWindow, width: Double, height: Double): Unit =
-    onFx {
+    FxProbe.onFx {
       window.stage.width = width
       window.stage.height = height
     }
@@ -268,67 +268,15 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     try session.tty.write(command + "\n")
     catch case e: IOException => throw new IllegalStateException(s"writing [$command] to the shell failed", e)
 
-  /** JediTermFX's own threads, by the names its code gives them: the emulator runs on `TerminalEmulator-<connector>` (ours is
-    * `TerminalEmulator-Local`), and its executors are `JediTerm-*` and `JediTerm-fast-job-*`. The emulator thread is created with
-    * `daemon = false`, so one left behind holds the JVM open as well as leaking a shell's worth of work.
-    */
-  private def sessionThreads: Seq[String] = (emulatorThreads ++ executorThreads).sorted
-
-  /** The one that does the work: `TerminalEmulator-Local` for a session of ours. */
-  private def emulatorThreads: Seq[String] = threadsNamed("TerminalEmulator")
-
-  private def executorThreads: Seq[String] = threadsNamed("JediTerm")
-
-  private def threadsNamed(containing: String): Seq[String] =
-    Thread.getAllStackTraces.keySet.asScala.toSeq.map(_.getName).filter(_.contains(containing)).sorted
-
-  /** Busies the FX thread, so anything marshalled while it runs stays queued. */
-  private def occupyFxThread(seconds: Long): Unit =
-    val busy = new CountDownLatch(1)
-    val _ = Platform.runLater(() =>
-      busy.countDown()
-      Thread.sleep(seconds * 1000)
-    )
-    val _ = busy.await(timeoutSeconds, TimeUnit.SECONDS)
-
-  /** Whether the OS still has that process — what `pgrep -f` would see. */
-  private def processAlive(pid: Long): Boolean =
-    val handle = ProcessHandle.of(pid)
-    handle.isPresent && handle.get.isAlive
-
   /** Polls the emulated screen until it says what is expected, or the timeout runs out. */
   private def await(session: TerminalSession, expected: String => Boolean, seconds: Long): Option[String] =
     val deadline = System.nanoTime() + seconds * 1_000_000_000L
     var matched: Option[String] = None
     var waiting = true
     while waiting && System.nanoTime() < deadline do
-      val text = onFx(session.screenText)
+      val text = FxProbe.onFx(session.screenText)
       if expected(text) then
         matched = Some(text)
         waiting = false
       else Thread.sleep(50)
     matched
-
-  private def awaitTrue(what: => Boolean, seconds: Long): Boolean =
-    val deadline = System.nanoTime() + seconds * 1_000_000_000L
-    var ok = what
-    while !ok && System.nanoTime() < deadline do
-      Thread.sleep(50)
-      ok = what
-    ok
-
-  /** Reads or touches JavaFX state from the probe's own thread, on the FX thread. A stuck FX thread is a failure, not a null result.
-    */
-  private def onFx[A](body: => A): A =
-    val result = new AtomicReference[A]()
-    val failure = new AtomicReference[Throwable]()
-    val done = new CountDownLatch(1)
-    Platform.runLater(() =>
-      try result.set(body)
-      catch case throwable: Throwable => failure.set(throwable)
-      finally done.countDown()
-    )
-    if !done.await(timeoutSeconds, TimeUnit.SECONDS) then
-      throw new IllegalStateException("the JavaFX thread did not answer within the timeout")
-    Option(failure.get).foreach(throwable => throw throwable)
-    result.get
