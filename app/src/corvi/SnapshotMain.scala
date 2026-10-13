@@ -2,7 +2,7 @@ package corvi
 
 import java.awt.image.BufferedImage
 import java.nio.file.{Files, Path, Paths}
-import javafx.application.Platform
+import javafx.animation.AnimationTimer
 import javafx.scene.image.WritableImage
 import javax.imageio.ImageIO
 import scalafx.Includes.*
@@ -21,16 +21,43 @@ import scalafx.scene.Scene
 private[corvi] object SnapshotMain extends JFXApp3:
   private val snapshot: Path = Paths.get("out", "corvi-shell.png")
 
+  /** About five seconds of pulses to wait for a shell to write its prompt before showing what there is; the blank check behind it is what
+    * decides whether the PNG is worth writing.
+    */
+  private val timeoutFrames: Int = 300
+
+  /** The terminal's canvas is repainted on its own schedule, so the snapshot waits this many pulses after the shell's first output —
+    * otherwise it catches the model with the prompt in it and a canvas still blank.
+    */
+  private val framesAfterOutput: Int = 10
+
   override def start(): Unit =
     val shell = new CorviShell
     val window = AppWindow.scene(shell)
     stage = AppWindow.stage(window, () => shell.shutdown())
-    // `onShown` fires once the window is on screen and its scene laid out; each `runLater` hop is
-    // a pulse boundary, so by the second one the scene has been painted. No timer, no sleep.
-    stage.onShown = () => Platform.runLater(() => Platform.runLater(() => write(window)))
+    stage.onShown = () => render(shell, window)
 
-  private def write(window: Scene): Unit =
+  /** The window is up. Wait for the terminal's shell to have written its prompt, give its canvas the pulses to paint it, then capture:
+    * polled rather than slept, so the PTY takes as long as it takes.
+    */
+  private def render(shell: CorviShell, window: Scene): Unit =
+    var frames = 0
+    var outputFrame = -1
+    val timer = new AnimationTimer:
+      override def handle(now: Long): Unit =
+        frames += 1
+        if outputFrame < 0 && shell.terminalHasOutput then outputFrame = frames
+        val painted = outputFrame >= 0 && frames - outputFrame >= framesAfterOutput
+        if painted || frames >= timeoutFrames then
+          stop()
+          write(shell, window)
+    timer.start()
+
+  private def write(shell: CorviShell, window: Scene): Unit =
     val buffered = toBufferedImage(window.snapshot(null))
+    // Same order the app quits in: the shell is stopped before the process goes, so a harness that
+    // exits with System.exit cannot leave one behind either.
+    shell.shutdown()
     if isBlank(buffered) then
       Console.err.println("SnapshotMain: the render is blank, so nothing was written")
       System.exit(1)
@@ -38,7 +65,9 @@ private[corvi] object SnapshotMain extends JFXApp3:
       val _ = Files.createDirectories(snapshot.getParent)
       ImageIO.write(buffered, "png", snapshot.toFile)
       println(s"wrote ${buffered.getWidth}×${buffered.getHeight} to ${snapshot.toAbsolutePath}")
-      Platform.exit()
+      // The terminal's emulator threads outlive the JavaFX toolkit, so a tool that renders once
+      // stops the process rather than waiting for a window nobody is watching.
+      System.exit(0)
 
   private def toBufferedImage(image: WritableImage): BufferedImage =
     val width = image.getWidth.toInt

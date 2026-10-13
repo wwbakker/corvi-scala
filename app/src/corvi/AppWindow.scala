@@ -1,5 +1,6 @@
 package corvi
 
+import javafx.application.Platform
 import scalafx.Includes.*
 import scalafx.application.JFXApp3.PrimaryStage
 import scalafx.scene.Scene
@@ -28,3 +29,11 @@ private[corvi] object AppWindow:
       minHeight = Theme.stageMinHeight
       this.scene = window
       onCloseRequest = () => onClose()
+
+  /** Quitting: every terminal stops on the FX thread — its shell killed and its emulator stopped — and only then does the toolkit go. The
+    * order is the point: `Platform.exit()` hides the window and ends the toolkit, so anything still being torn down after it may never
+    * finish, which used to leave a login shell and a non-daemon emulator thread behind.
+    */
+  def quit(shell: CorviShell): Unit =
+    shell.shutdown()
+    Platform.exit()

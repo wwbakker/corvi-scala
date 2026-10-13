@@ -37,6 +37,11 @@ private[corvi] object Theme:
   val iconBox: Double = 16
   val terminalIconSize: Double = 13
 
+  /** The terminal paints itself rather than being styled, so its font size is a number here rather than a rule in `corvi.css`; Corvi's
+    * xterm theme asks for 13.
+    */
+  val terminalFontSize: Float = 13f
+
   /** The cog is drawn on a 24 grid instead (see `Icons.gear`) and shown a size up from the status glyphs, as upstream's sidebar does.
     */
   val gearIconSize: Double = 15
