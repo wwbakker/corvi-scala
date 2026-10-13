@@ -13,10 +13,10 @@ val javafxClassifier: String =
   else if arch.contains("aarch64") then "linux-aarch64"
   else "linux"
 
-/** ScalaFX's POM pulls in every OpenJFX module — fxml/media/swing/web plus `jdk-jsobject`, ~38 MB of natives this app never touches — and
-  * repeats the bare stubs those modules' own POMs declare. The three modules we use are added explicitly with the classifier instead. Mill
-  * parses one exclusion per `;exclude=` segment; a comma-separated list is silently read as a single bogus exclusion, so each one needs its
-  * own segment.
+val javafxVersion: String = "26"
+
+/** Mill parses one exclusion per `;exclude=` segment; a comma-separated list is silently read as a single bogus exclusion, so each one
+  * needs its own segment.
   */
 val noTransitiveOpenJfx: String = "exclude=org.openjfx:*"
 
@@ -36,7 +36,6 @@ object app extends ScalaModule:
   )
 
   def mvnDeps = Task {
-    val fx = "26"
     Seq(
       mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library",
       mvn"com.softwaremill.ox::core:1.0.9;$noTransitiveScala3Library",
@@ -44,8 +43,21 @@ object app extends ScalaModule:
       mvn"com.techsenger.jeditermfx:jeditermfx-core:1.1.0;$noTransitiveOpenJfx",
       mvn"com.techsenger.jeditermfx:jeditermfx-ui:1.1.0;$noTransitiveOpenJfx",
       mvn"org.jetbrains.pty4j:pty4j:0.14.0"
-    ) ++ Seq("base", "graphics", "controls")
+    ) ++ Seq("base", "graphics", "controls", "media")
       // The classifier jar replaces the stub for the module itself; the exclusion drops the bare
       // stubs each OpenJFX POM repeats for its siblings.
-      .map(m => mvn"org.openjfx:javafx-$m:$fx;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }
+
+  /** ScalaFX's own signatures mention JavaFX modules this app never calls — `javafx.scene.web` and `javafx.embed.swing` — and the compiler
+    * needs their jars to read those signatures. They stay compile-only; javafx-web alone is 36 MB of natives.
+    *
+    * `javafx.media` cannot be compile-only: applying an implicit conversion brings `scalafx.Includes` into the running program, and
+    * `Includes` resolves `javafx.scene.media.MediaException` (the stylesheet assignment in `AppWindow.scala` is the first conversion the
+    * app applies). An unused import alone loads nothing. Without the module the app dies at startup with
+    * `NoClassDefFoundError: javafx/scene/media/MediaException$Type`.
+    */
+  def compileMvnDeps = Task {
+    Seq("web", "swing")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
   }
