@@ -1,0 +1,10 @@
+# Mill
+out/
+.bsp/
+.bloop/
+.metals/
+.scala-build/
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
