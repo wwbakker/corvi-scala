@@ -3,6 +3,7 @@ package corvi.terminal
 import java.io.IOException
 import corvi.{AppWindow, CorviShell, FxProbe, LiveProcesses}
 import javafx.application.Platform
+import ox.*
 import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -41,9 +42,11 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     // daemon — while JediTermFX's emulator thread is created with `daemon = false` on purpose. A
     // session left running is therefore what would hold the JVM open, which is what the leak checks
     // below look for rather than the process simply returning.
-    val _ = Thread.ofPlatform().name("corvi-pty-probe").start(() => run())
+    // The probe hosts a scope of its own, on its own thread: the watchers of the sessions it opens are forks
+    // of it, and its lifetime is the probe's.
+    val _ = Thread.ofPlatform().name("corvi-pty-probe").start(() => supervised(run()))
 
-  private def run(): Unit =
+  private def run()(using Ox): Unit =
     var failures = 0
     def report(name: String, ok: Boolean, detail: String): Unit =
       if !ok then failures += 1
@@ -54,7 +57,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     val reads = new AtomicInteger(0)
     val exited = new CountDownLatch(1)
     val session = FxProbe.onFx(
-      TerminalSession.open(
+      TerminalSession.create(
         id = 0,
         label = "probe",
         cwd = cwd,
@@ -62,6 +65,8 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
         onExited = _ => exited.countDown()
       )
     )
+    // The session is created on the FX thread; watching it is a fork, so it belongs to this probe's scope.
+    forkDiscard(session.watch())
     println(s"session ${session.id} (${session.label}) in $cwd, shell pid ${session.pid}")
 
     val window = FxProbe.onFx(windowFor(session))
@@ -114,7 +119,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     // rather than a timing detail.
     val secondExits = new CountDownLatch(1)
     val second = FxProbe.onFx(
-      TerminalSession.open(
+      TerminalSession.create(
         id = 1,
         label = "probe-close",
         cwd = cwd,
@@ -122,6 +127,7 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
         onExited = _ => secondExits.countDown()
       )
     )
+    forkDiscard(second.watch())
     val secondPrompt = await(second, _.trim.nonEmpty, timeoutSeconds)
     report("a second session spawned for the teardown check", secondPrompt.isDefined, secondPrompt.getOrElse(""))
 
@@ -141,8 +147,9 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     // shows its own threads, so a "none left behind" result means something. It is closed straight
     // after, so the probe still leaves nothing.
     val control = FxProbe.onFx(
-      TerminalSession.open(id = 2, label = "probe-control", cwd = cwd, onOutput = _ => (), onExited = _ => ())
+      TerminalSession.create(id = 2, label = "probe-control", cwd = cwd, onOutput = _ => (), onExited = _ => ())
     )
+    forkDiscard(control.watch())
     val controlPrompt = await(control, _.trim.nonEmpty, timeoutSeconds)
     report("a third session spawned for the leak control", controlPrompt.isDefined, controlPrompt.getOrElse(""))
     val controlSeen = FxProbe.awaitTrue(LiveProcesses.emulatorThreads.nonEmpty, 10)
@@ -163,7 +170,8 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
     // toolkit — so the checks that must look *after* the quit are a shutdown hook, which still gets
     // to look and to say so before the process goes. Everything in there is plain Java: the toolkit
     // is gone by design, which is the point of the fix.
-    val app = FxProbe.onFx(appWindow())
+    val appForker = SessionForker.inScope
+    val app = FxProbe.onFx(appWindow(appForker))
     val appShells = FxProbe.awaitTrue(LiveProcesses.childShells.nonEmpty, 15)
     report("the app's shell is running under this JVM", appShells, LiveProcesses.childShells.map(_.pid.toString).mkString(", "))
     val _ = Runtime.getRuntime.addShutdownHook(
@@ -194,8 +202,8 @@ private[corvi] object TerminalProbeMain extends JFXApp3:
 
   /** A `CorviShell` in a window wired the way `Main` wires it, so its close request runs the app's own quit.
     */
-  private def appWindow(): Stage =
-    val shell = new CorviShell
+  private def appWindow(forker: SessionForker): Stage =
+    val shell = CorviShell.open(forker)
     val stage = AppWindow.stage(AppWindow.scene(shell), () => AppWindow.quit(shell))
     stage.show()
     stage

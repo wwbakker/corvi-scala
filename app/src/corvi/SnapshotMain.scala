@@ -1,12 +1,15 @@
 package corvi
 
+import corvi.terminal.SessionForker
 import java.awt.image.BufferedImage
 import java.nio.file.{Files, Path, Paths}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.animation.AnimationTimer
 import javafx.scene.image.WritableImage
 import javax.imageio.ImageIO
 import scalafx.Includes.*
 import scalafx.application.JFXApp3
+import ox.*
 import scalafx.scene.Scene
 
 /** Renders the real application window — `AppWindow`/`CorviShell`, the same scene `Main` shows — into `out/corvi-shell.png`, then exits:
@@ -26,13 +29,41 @@ private[corvi] object SnapshotMain extends JFXApp3:
     */
   private val timeoutFrames: Int = 300
 
-  /** The terminal's canvas is repainted on its own schedule, so the snapshot waits this many pulses after the shell's first output —
-    * otherwise it catches the model with the prompt in it and a canvas still blank.
+  /** How many consecutive pulses the terminal's screen has to stop changing before the capture. The shell redraws its prompt once the
+    * widget has told the PTY the real window size — half a second in — and the canvas repaints on its own schedule, so "the first output
+    * has arrived" is too early: the PNG then depends on where the resize landed and differs from run to run. A second of stillness covers
+    * both.
     */
-  private val framesAfterOutput: Int = 10
+  private val settleFrames: Int = 60
+
+  /** The scope that watches this harness's session. A `JFXApp3` does its work on the FX thread, which cannot fork, so the scope is opened
+    * on a thread of its own and the shell is handed the bridge to it — the shape `Main` uses, minus the scope owning the app's own body.
+    * `never` keeps that thread (and the scope) alive until the process exits; the harness shuts the session down itself, so nothing is left
+    * to clean up.
+    */
+  private val forker: java.util.concurrent.atomic.AtomicReference[SessionForker | Null] =
+    new java.util.concurrent.atomic.AtomicReference(null)
+  private val forkerReady: CountDownLatch = new CountDownLatch(1)
+  private val _ = Thread
+    .ofPlatform()
+    .name("corvi-snapshot-scope")
+    .start(() =>
+      supervised {
+        forker.set(SessionForker.inScope)
+        forkerReady.countDown()
+        never
+      }
+    )
+
+  /** Waits for the scope's bridge, and says so loudly if the scope never came up: a silent `null` here would surface much later as a
+    * missing terminal.
+    */
+  private def awaitForker(): SessionForker =
+    if !forkerReady.await(10, TimeUnit.SECONDS) then throw new IllegalStateException("the snapshot's scope did not start")
+    Option(forker.get).getOrElse(throw new IllegalStateException("the snapshot's scope started without a forker"))
 
   override def start(): Unit =
-    val shell = new CorviShell
+    val shell = CorviShell.open(awaitForker())
     val window = AppWindow.scene(shell)
     stage = AppWindow.stage(window, () => shell.shutdown())
     stage.onShown = () => render(shell, window)
@@ -42,13 +73,15 @@ private[corvi] object SnapshotMain extends JFXApp3:
     */
   private def render(shell: CorviShell, window: Scene): Unit =
     var frames = 0
-    var outputFrame = -1
+    var settled = 0
+    var previous = ""
     val timer = new AnimationTimer:
       override def handle(now: Long): Unit =
         frames += 1
-        if outputFrame < 0 && shell.terminalHasOutput then outputFrame = frames
-        val painted = outputFrame >= 0 && frames - outputFrame >= framesAfterOutput
-        if painted || frames >= timeoutFrames then
+        val screen = shell.selectedScreen
+        settled = if screen.nonEmpty && screen == previous then settled + 1 else 0
+        previous = screen
+        if settled >= settleFrames || frames >= timeoutFrames then
           stop()
           write(shell, window)
     timer.start()

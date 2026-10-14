@@ -5,17 +5,17 @@ import com.techsenger.jeditermfx.core.TtyConnector
 import com.techsenger.jeditermfx.ui.{DefaultHyperlinkFilter, JediTermFxWidget}
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javafx.application.Platform
 import org.slf4j.LoggerFactory
-import ox.*
-import ox.channels.Channel
+import scala.jdk.CollectionConverters.*
 import scalafx.scene.layout.{Pane as SfxPane}
 
-/** One terminal: a login shell on a real PTY, JediTermFX emulating the VT side of it, and one ox scope owning the lifecycle.
+/** One terminal: a login shell on a real PTY, and JediTermFX emulating the VT side of it.
   *
-  * Build it on the JavaFX thread — the widget is a JavaFX node. The session is what the shell (chunk 4) keeps per tab and closes when the
-  * tab goes.
+  * The session is *created* on the JavaFX thread — the widget is a JavaFX node — and *watched* by a fork inside the application's Ox scope
+  * (see `SessionForker` for why the FX thread cannot start that fork itself). `watch` is the watcher's body; the fork's lifetime is the
+  * session's lifetime, and closing the connector is what ends the shell the fork is waiting on.
   */
 private[corvi] final class TerminalSession(
     val id: Int,
@@ -23,10 +23,14 @@ private[corvi] final class TerminalSession(
     private val widget: JediTermFxWidget,
     private val connector: PtyProcessTtyConnector,
     private val process: PtyProcess,
-    private val closing: AtomicBoolean,
-    private val signalClose: () => Unit
+    private val onExited: Int => Unit
 ):
-  private val disposed = new AtomicBoolean(false)
+  import TerminalSession.Lifecycle
+
+  /** The one piece of state the session keeps: whether the shell is running, was closed by the user, or ended by itself. It decides two
+    * things — whether `onExited` fires, and nothing else needs a flag.
+    */
+  private val lifecycle: AtomicReference[Lifecycle] = new AtomicReference(Lifecycle.Open)
 
   /** The node the terminal paints into — the well's content.
     *
@@ -36,7 +40,7 @@ private[corvi] final class TerminalSession(
     */
   val pane: SfxPane = new SfxPane(widget.getPane)
 
-  /** The shell's process id, for the checks and the log. */
+  /** The shell's process id, for the log and the checks. */
   def pid: Long = process.pid()
 
   /** The emulated screen as text, empty when the buffer has nothing to give — `getScreenLines` can answer `null` under load, and an absent
@@ -54,43 +58,64 @@ private[corvi] final class TerminalSession(
 
   def isAlive: Boolean = process.isAlive
 
-  /** Ends the session: the emulator is stopped, the shell killed, and the ox scope signalled so its thread finishes. Idempotent, and safe
-    * on the FX thread — which is where quitting calls it. Teardown has to be *done* before `Platform.exit()`, not raced against it, or a
-    * killed toolkit leaves a live shell and a non-daemon emulator thread holding the JVM up.
-    *
-    * `closing` means "the user asked", so a shell that ends on its own is still reported through `onExited`; the scope's own teardown calls
-    * `dispose` and leaves that flag alone.
+  /** Ends the session because the user asked: the shell is killed here and now, and the watcher in the app scope wakes on the dead process
+    * and tears the widget down. Idempotent, and safe on the FX thread, which is where quitting calls it — teardown has to be *done* before
+    * `Platform.exit()`, not raced against it. Closing does not report an exit: `onExited` is for a shell that ended on its own.
     */
   def close(): Unit =
-    closing.set(true)
-    dispose()
-    signalClose()
+    if lifecycle.compareAndSet(Lifecycle.Open, Lifecycle.Closing) then dispose()
 
-  /** Kills the shell and stops the emulator, once. The connector goes first: it is the only thing that actually destroys the shell, so
-    * nothing after it may be able to skip it.
+  /** The watcher's body, run as a fork in the application's scope: block until the shell is gone — because it exited, or because `close`
+    * destroyed it — report a shell that ended by itself, and tear down.
+    */
+  def watch(): Unit =
+    try
+      val _ = process.waitFor()
+      // The shell ended by itself only if nobody asked it to close. The CAS comes first, so a close that
+      // lands while the exit is being reported still wins: `close` sees `Exited` and does not dispose twice,
+      // and the report a moment later is a no-op if that window has already gone (`ShellState.ended` on an
+      // absent id). The marshalling is guarded like the other two bridges — a toolkit on its way out must not
+      // fail the app's scope.
+      if lifecycle.compareAndSet(Lifecycle.Open, Lifecycle.Exited) then
+        try Platform.runLater(() => onExited(id))
+        catch case _: IllegalStateException => ()
+    catch case _: InterruptedException => ()
+    finally dispose()
+
+  /** Kills the shell and stops the emulator. The connector goes first, because it is the only thing that actually destroys the shell, so
+    * nothing after it may be able to skip it. Both closes are idempotent (`ProcessTtyConnector.close` destroys and closes streams that
+    * tolerate being closed twice; the widget's `close` stops a timeline and shuts executors down once), which is why this needs no guard of
+    * its own and can run from either thread.
     */
   private def dispose(): Unit =
-    if disposed.compareAndSet(false, true) then
-      connector.close()
-      if Platform.isFxApplicationThread then stopWidget()
-      else
-        try Platform.runLater(() => stopWidget())
-        catch case _: Throwable => () // the toolkit is already gone; the JVM is on its way out
+    connector.close()
+    if Platform.isFxApplicationThread then stopWidget()
+    else
+      try Platform.runLater(() => stopWidget())
+      catch case _: Throwable => () // the toolkit is already gone; the JVM is on its way out
 
   private def stopWidget(): Unit =
     try widget.close()
-    // A panel that fails to dispose must not leave the shell or the emulator's threads alive; the
-    // connector above has already done the part that matters.
     catch case failure: Throwable => TerminalSession.logger.warn(s"session $id: closing the widget failed", failure)
 
 private[corvi] object TerminalSession:
   private val logger = LoggerFactory.getLogger(getClass)
 
+  /** Where a session is in its life. One value, so "the user closed it" and "it exited" cannot both be true or both be missing.
+    */
+  enum Lifecycle:
+    case Open, Closing, Exited
+
   /** The size a fresh PTY starts at; the widget resizes it from the panel's real size afterwards. */
   private val initialColumns: Int = 80
   private val initialRows: Int = 24
 
-  def open(id: Int, label: String, cwd: Path, onOutput: Int => Unit, onExited: Int => Unit): TerminalSession =
+  /** Starts a login shell on a real PTY and its emulator. Runs on the JavaFX thread, because the widget is a JavaFX node; the caller then
+    * hands the session to `SessionForker`, which forks `watch` into the application's scope.
+    *
+    * A failure here leaves nothing behind: a shell must not outlive a session that never got to exist.
+    */
+  def create(id: Int, label: String, cwd: Path, onOutput: Int => Unit, onExited: Int => Unit): TerminalSession =
     val process = spawn(cwd)
     val connector =
       try new PtyProcessTtyConnector(process, StandardCharsets.UTF_8, () => onOutput(id))
@@ -102,48 +127,9 @@ private[corvi] object TerminalSession:
       try startWidget(connector)
       catch
         case failure: Throwable =>
-          // A shell must not outlive a session that never got to exist.
           connector.close()
           throw failure
-
-    val closing = new AtomicBoolean(false)
-    val sentOnce = new AtomicBoolean(false)
-    val closeSignal = Channel.buffered[Unit](1)
-
-    // Exactly one token ever reaches the channel, so neither a shell that exits nor a `close()`
-    // from the UI can block on a full buffer.
-    def signalClose(): Unit =
-      if sentOnce.compareAndSet(false, true) then closeSignal.send(())
-
-    val session = new TerminalSession(id, label, widget, connector, process, closing, signalClose)
-
-    // One raw virtual thread hosts the scope, and everything inside it is ox. It cannot be the FX
-    // thread — `supervised` blocks — and JFXApp3 owns the process's main thread on macOS, so the
-    // session gets its own. The scope lives as long as the tab does: that is deliberate, and longer
-    // than the short scopes ox prefers.
-    val _ = Thread
-      .ofVirtual()
-      .name(s"corvi-session-$id")
-      .start(() =>
-        try
-          supervised {
-            forkDiscard {
-              try
-                val _ = process.waitFor()
-                // The check is inside the marshalled block: a `close()` that lands between the fork
-                // and the FX thread must not still report an exit for a session the user just closed.
-                if !closing.get() then Platform.runLater(() => if !closing.get() then onExited(id))
-              catch case _: InterruptedException => ()
-              finally signalClose()
-            }
-            closeSignal.receive()
-          }
-        catch case failure: Throwable => logger.warn(s"session $id ended with $failure")
-          // The scope tearing down is not the user closing: `dispose` is the same once-only teardown
-          // `close` runs, without setting `closing`, so an exit the fork has already queued still reports.
-        finally session.dispose()
-      )
-    session
+    new TerminalSession(id, label, widget, connector, process, onExited)
 
   /** The widget is a JavaFX node, so this runs on the caller's (FX) thread; any failure is the caller's cue to destroy the process it was
     * handed.
@@ -160,8 +146,10 @@ private[corvi] object TerminalSession:
     */
   private def spawn(cwd: Path): PtyProcess =
     val shell = Option(System.getenv("SHELL")).filter(_.nonEmpty).getOrElse("/bin/sh")
-    val environment = new java.util.HashMap[String, String](System.getenv())
-    val _ = environment.put("TERM", "xterm-256color")
+    // The env is the app's own, plus the one variable that makes the pty a colour terminal; `asJava` of an
+    // immutable map, so the bridge to pty4j's Java API stays a conversion rather than a mutable collection.
+    val environment: java.util.Map[String, String] =
+      (System.getenv().asScala.toMap + ("TERM" -> "xterm-256color")).asJava
     new PtyProcessBuilder()
       .setCommand(Array(shell, "-l"))
       .setEnvironment(environment)

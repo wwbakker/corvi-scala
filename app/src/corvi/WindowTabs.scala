@@ -7,93 +7,66 @@ import scalafx.scene.Node
 import scalafx.scene.control.{ContextMenu, Label, MenuItem}
 import scalafx.scene.layout.{FlowPane, HBox, Region}
 
-/** The window strip: `Overview | <windows…> | new`, with the two ends fixed and never reorderable. It draws a `ShellState` and calls back
-  * into the shell; the only state of its own is a drag that is in flight.
+/** The window strip: `Overview | <windows…> | new`, with the two ends fixed and never reorderable. It draws a `ShellState`, reports the
+  * gestures it recognises as `WindowIntent`s, and keeps no state of its own — the drag in flight lives in the `TabDragState` it is handed,
+  * because a drag must not re-render the strip and the shell is the one that decides when a render may run.
   */
 private[corvi] object WindowTabs:
-  /** A tab drag in flight, as the shell has to know it: rendering waits for a carry, because a strip rebuilt mid-drag would detach the very
-    * nodes the gesture is grabbing.
-    */
-  enum Drag:
-    case Idle
-    case Carrying(from: Int)
-
-  /** What the strip asks the shell to do. */
-  final case class Actions(
-      selectOverview: () => Unit,
-      selectWindow: Int => Unit,
-      closeWindow: Int => Unit,
-      openWindow: () => Unit,
-      moveWindow: (Int, Int) => Unit,
-      dragging: Drag => Unit
-  )
-
   /** The style class a tab carries while a drag is carrying it. */
   private val dragging: String = "dragging"
 
-  def strip(selection: Selection, windows: Seq[TerminalWindow], actions: Actions): FlowPane =
-    // The drag in flight: what was pressed, what it is carrying, and whether the click that follows a
-    // drag is to be swallowed. Deliberately not in `ShellState`: a drag must not re-render the strip,
-    // because that would rebuild the very nodes the gesture is running on. The cost is that a
-    // re-render for some other reason (output arriving in a background window) drops the fade — the
-    // drag itself still lands, since the gesture keeps the handlers it started with.
-    var pressed: Option[Int] = None
-    var carried: Option[Int] = None
-    // Set only when a drag actually moved a window: the click the platform sends afterwards is not a
-    // selection then. It is cleared at the start of every gesture, so a carry that lands back where it
-    // started cannot swallow the next click.
-    var suppressClick = false
-
-    val windowTabs: Seq[(Int, HBox)] = windows.map(window => window.id -> windowTab(window, selection))
+  def strip(
+      selection: Selection,
+      windows: Seq[TerminalWindow],
+      drag: TabDragState,
+      intent: WindowIntent => Unit
+  ): FlowPane =
+    val windowTabs: Seq[(WindowId, HBox)] = windows.map(window => window.id -> windowTab(window, selection, drag))
 
     /** The window whose tab holds that node: the pointer is over a label or an icon as often as it is over the tab itself.
       */
-    def windowAt(node: Option[JfxNode]): Option[Int] =
+    def windowAt(node: Option[JfxNode]): Option[WindowId] =
       node.flatMap(at => windowTabs.collectFirst { case (id, tab) if isInside(at, tab.delegate) => id })
 
     def isInside(node: JfxNode, ancestor: JfxNode): Boolean =
       if node == null then false else (node eq ancestor) || isInside(node.getParent, ancestor)
 
-    def tabFor(id: Int): Option[HBox] = windowTabs.collectFirst { case (each, tab) if each == id => tab }
+    def tabFor(id: WindowId): Option[HBox] = windowTabs.collectFirst { case (each, tab) if each == id => tab }
 
     /** Drags are wired on the JavaFX nodes: a pick result and the button of a press are JavaFX types, and ScalaFX's wrappers would only be
       * in the way.
       */
-    def attachDrag(tab: HBox, id: Int, actions: Actions): Unit =
+    def attachDrag(tab: HBox, id: WindowId): Unit =
       val node = tab.delegate
-      node.setOnMousePressed(event =>
-        suppressClick = false
-        if event.getButton == JfxMouseButton.PRIMARY then
-          pressed = Some(id)
-          carried = None
-      )
+      node.setOnMousePressed(event => if event.getButton == JfxMouseButton.PRIMARY then drag.update(TabDrag.Pressed(id)))
       node.setOnMouseDragged(event =>
-        pressed match
-          case Some(from) if carried.isEmpty && windowAt(Option(event.getPickResult.getIntersectedNode)).exists(_ != from) =>
-            carried = Some(from)
+        drag.drag match
+          // Carrying starts when the pointer reaches another tab. That is what matters for the drop — the tab
+          // under the pointer — and it means a click that wobbles never becomes a drag.
+          case TabDrag.Pressed(from) if windowAt(Option(event.getPickResult.getIntersectedNode)).exists(_ != from) =>
+            drag.update(TabDrag.Carrying(from))
             tabFor(from).foreach(carrying => { val _ = carrying.styleClass += dragging })
-            actions.dragging(Drag.Carrying(from))
           case _ => ()
       )
       node.setOnMouseReleased(event =>
-        carried.foreach { from =>
-          tabFor(from).foreach(carrying => { val _ = carrying.styleClass -= dragging })
-          windowAt(Option(event.getPickResult.getIntersectedNode)).filter(_ != from) match
-            case Some(to) =>
-              actions.moveWindow(from, to)
-              suppressClick = true
-            case None => ()
-          // The render the move asked for has been waiting, and runs here.
-          actions.dragging(Drag.Idle)
-        }
-        pressed = None
-        carried = None
+        drag.drag match
+          case TabDrag.Carrying(from) =>
+            tabFor(from).foreach(carrying => { val _ = carrying.styleClass -= dragging })
+            windowAt(Option(event.getPickResult.getIntersectedNode)).filter(_ != from) match
+              case Some(to) =>
+                drag.update(TabDrag.Dropped(from))
+                intent(WindowIntent.MoveWindow(from, to))
+              case None => drag.update(TabDrag.Idle)
+          case _ => ()
       )
-      tab.onMouseClicked = _ => if suppressClick then suppressClick = false else actions.selectWindow(id)
+      tab.onMouseClicked = _ =>
+        drag.drag match
+          case TabDrag.Dropped(_) => drag.update(TabDrag.Idle) // the click a drag leaves behind
+          case _                  => intent(WindowIntent.SelectWindow(id))
 
     windowTabs.foreach { case (id, tab) =>
-      closeMenu(tab, id, actions)
-      attachDrag(tab, id, actions)
+      closeMenu(tab, id, intent)
+      attachDrag(tab, id)
     }
 
     new FlowPane:
@@ -104,11 +77,11 @@ private[corvi] object WindowTabs:
       // The row, plus the hairline the border adds under it.
       minHeight = Theme.tabRowHeight + Theme.stripHairline
       prefHeight = Theme.tabRowHeight + Theme.stripHairline
-      children = overviewTab(selection, actions) +: (windowTabs.map(_._2) :+ newTab(actions))
+      children = overviewTab(selection, intent) +: (windowTabs.map(_._2) :+ newTab(intent))
 
   /** The fixed left end, and the way back to the placeholder: a label and nothing else — upstream gives the Overview tab no icon.
     */
-  private def overviewTab(selection: Selection, actions: Actions): HBox =
+  private def overviewTab(selection: Selection, intent: WindowIntent => Unit): HBox =
     val tab = tabNode(
       label = "Overview",
       icon = None,
@@ -117,11 +90,11 @@ private[corvi] object WindowTabs:
       ended = false,
       extra = Seq("overview")
     )
-    tab.onMouseClicked = _ => actions.selectOverview()
+    tab.onMouseClicked = _ => intent(WindowIntent.SelectOverview)
     tab
 
-  private def windowTab(window: TerminalWindow, selection: Selection): HBox =
-    tabNode(
+  private def windowTab(window: TerminalWindow, selection: Selection, drag: TabDragState): HBox =
+    val tab = tabNode(
       label = window.label,
       icon = Some(Icons.terminal(iconClasses(window.state)*)),
       bell = window.activity == TerminalWindow.Activity.Unseen,
@@ -129,18 +102,22 @@ private[corvi] object WindowTabs:
       ended = window.state == TerminalWindow.State.Ended,
       extra = Seq.empty
     )
+    // A render that arrived mid-drag was deferred, so the fade is re-applied here when one runs between
+    // gestures rather than being lost with the nodes.
+    if drag.drag == TabDrag.Carrying(window.id) then { val _ = tab.styleClass += dragging }
+    tab
 
   /** The fixed right end: the terminal glyph first, then the label. */
-  private def newTab(actions: Actions): HBox =
+  private def newTab(intent: WindowIntent => Unit): HBox =
     val tab =
       tabNode(label = "new", icon = Some(Icons.terminal("tab-icon")), bell = false, selected = false, ended = false, extra = Seq("new"))
-    tab.onMouseClicked = _ => actions.openWindow()
+    tab.onMouseClicked = _ => intent(WindowIntent.OpenWindow)
     tab
 
   /** Right-clicking a window tab offers to close it. */
-  private def closeMenu(tab: HBox, window: Int, actions: Actions): Unit =
+  private def closeMenu(tab: HBox, window: WindowId, intent: WindowIntent => Unit): Unit =
     val close = new MenuItem("Close tab"):
-      onAction = _ => actions.closeWindow(window)
+      onAction = _ => intent(WindowIntent.CloseWindow(window))
     val menu = new ContextMenu(close)
     tab.onContextMenuRequested = event =>
       menu.show(tab, Side.Bottom, 0, 0)

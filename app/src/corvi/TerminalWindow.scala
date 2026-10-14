@@ -1,10 +1,23 @@
 package corvi
 
+/** A window's identity, kept distinct from a position: both are `Int`, and confusing them is exactly the mistake the tab strip invites —
+  * `ctrl-b <n>` takes a position, a drag takes ids, and `closed` takes an id while `moved` takes two. Opaque, so the compiler keeps them
+  * apart.
+  */
+private[corvi] opaque type WindowId = Int
+
+private[corvi] object WindowId:
+  def apply(value: Int): WindowId = value
+
+  extension (id: WindowId)
+    def value: Int = id
+    def next: WindowId = id + 1
+
 /** One terminal window as the strip shows it: what it is called, what its shell is doing, and whether output has arrived that you have not
   * looked at. Immutable; `ShellState` holds these and `WindowTabs` draws them.
   */
 private[corvi] final case class TerminalWindow(
-    id: Int,
+    id: WindowId,
     label: String,
     state: TerminalWindow.State,
     activity: TerminalWindow.Activity

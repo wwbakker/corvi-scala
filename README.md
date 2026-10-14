@@ -44,11 +44,15 @@ nodes) and asserts both the state and what the strip renders; `TerminalProbeMain
 asserts what a shell does, including resizing the *window* and that closing a session kills the shell and
 leaves no `TerminalEmulator-*` thread.
 
+The design behind the concurrency — what Ox owns, what JavaFX will not let it, and the experiments that settled
+it — is written up in [`docs/direct-style.md`](docs/direct-style.md).
+
 `SnapshotMain` exists because this machine has no Screen Recording permission — `screencapture` fails
 and `osascript` times out — so the only way to look at the UI is to render the JavaFX scene to a PNG. It
-waits for the shell's first output and then ten pulses, so the canvas has painted what the model already
-holds (capped at 300 pulses, about five seconds); it refuses to write a blank image and it prints where
-the keyboard is.
+waits for the terminal's screen to stop changing — the shell redraws its prompt once the widget has told the
+PTY the real window size, half a second in, so the first output would be too early and the PNG would depend on
+where the resize landed — and captures after a second of stillness (capped at 300 pulses, about five seconds).
+It refuses to write a blank image and it prints where the keyboard is.
 
 ### Metals
 
@@ -196,20 +200,24 @@ measure.
 ```
 build.mill                     Scala 3.10, OpenJFX classifier, deps (see the comments for why javafx-media
                                cannot be compile-only, and why web/swing only are)
+docs/direct-style.md           the Ox/JavaFX arrangement, the experiments behind it, what cannot move
 app/src/corvi/
-  Main.scala                   JFXApp3: the stage, and quitting in the right order
+  Main.scala                   the entry point: the one Ox scope, with Application.launch inside it
+  CorviApp.scala               the JFXApp3: the stage and the window, handed the bridge to that scope
   AppWindow.scala              the scene, the stylesheet, the scene-level chord filters
-  CorviShell.scala             sessions, selection, rendering, the chords; the one holder of ShellState
-  ShellState.scala             immutable state and its pure transitions; Selection
-  TerminalWindow.scala         one window: label, Idle/Ended, Quiet/Unseen
+  CorviShell.scala             sessions, selection, rendering, the chords; the holder of ShellState
+  ShellState.scala             immutable state and its pure transitions; Selection; WindowIntent
+  TerminalWindow.scala         one window: label, Idle/Ended, Quiet/Unseen; the WindowId opaque type
   WindowTabs.scala             the strip: Overview | windows | new, clicks, the close menu, the drag
-  Chords.scala                 the keyboard chords as a pure state machine
+  TabDrag.scala                the drag in flight, and the render that waits for it
+  Chords.scala                 the keyboard chords as a pure state machine (`KeyEvent` only in Key.from)
   Sidebar.scala, Icons.scala, Theme.scala
   SnapshotMain.scala           renders the window to out/corvi-shell.png
   FxProbe.scala, LiveProcesses.scala   the harness plumbing the probes share
   TabsProbeMain.scala          the tab/chord/drag checks
   terminal/
-    TerminalSession.scala      PTY + widget + one ox scope per session; the session's lifetime
+    TerminalSession.scala      the PTY and the widget: created on the FX thread, watched by a fork
+    SessionForker.scala        the one bridge — the FX thread cannot fork, so it hands sessions over
     PtyProcessTtyConnector.scala  vendored from JediTermFX's unpublished demo
     CorviSettingsProvider.scala   colours and font for the canvas
     TerminalProbeMain.scala    the PTY checks
