@@ -124,6 +124,11 @@
     -fx-cursor: hand;
 }
 
+/* The tab a drag is carrying. */
+.window-tab.dragging {
+    -fx-opacity: 0.4;
+}
+
 .window-tab:hover {
     -fx-background-color: -fx-corvi-raise;
 }

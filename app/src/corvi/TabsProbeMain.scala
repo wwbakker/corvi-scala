@@ -2,10 +2,11 @@ package corvi
 
 import corvi.terminal.TerminalSession
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 import javafx.application.Platform
 import javafx.scene.{Node, Parent}
 import javafx.scene.control.{ContextMenu, Label}
-import javafx.scene.input.{ContextMenuEvent, MouseButton, MouseEvent, PickResult}
+import javafx.scene.input.{ContextMenuEvent, KeyCode, KeyEvent, MouseButton, MouseEvent, PickResult}
 import javafx.scene.paint.{Color, Paint}
 import javafx.scene.shape.SVGPath
 import javafx.stage.Window
@@ -34,6 +35,15 @@ private[corvi] object TabsProbeMain extends JFXApp3:
   private val error: String = Color.web("#f85149").toString
   private val onAccent: String = Color.web("#ffffff").toString
 
+  /** What reaches the terminal's side of the scene: the keystrokes and the typed characters that were not consumed on the way down to it.
+    */
+  private final class Delivered:
+    val presses: AtomicInteger = new AtomicInteger(0)
+    val typed: AtomicInteger = new AtomicInteger(0)
+
+  /** What `corvi.css` fades a carried tab to. */
+  private val carryingOpacity: Double = 0.4
+
   override def start(): Unit =
     JFXApp3.AutoShow = false
     Platform.setImplicitExit(false)
@@ -48,6 +58,15 @@ private[corvi] object TabsProbeMain extends JFXApp3:
 
     val shell = FxProbe.onFx(new CorviShell)
     val window = FxProbe.onFx(openWindow(shell))
+    // What the terminal's side of the scene actually sees. The strip's filter is on the scene and this
+    // one is on the root, so a key the strip takes stops between them — which is what "the shell never
+    // sees it" means, and it is checked this way because JavaFX retargets events on the way down, so
+    // the fired event's own consumed flag says nothing.
+    val delivered = new Delivered
+    FxProbe.onFx {
+      val _ = window.root.addEventFilter(KeyEvent.KEY_PRESSED, (_: KeyEvent) => { val _ = delivered.presses.incrementAndGet() })
+      val _ = window.root.addEventFilter(KeyEvent.KEY_TYPED, (_: KeyEvent) => { val _ = delivered.typed.incrementAndGet() })
+    }
     try
       // The window opens with one terminal of its own, so there is a prompt to type at.
       val prompt = FxProbe.awaitTrue(shellHasOutput(shell), openSeconds)
@@ -263,11 +282,168 @@ private[corvi] object TabsProbeMain extends JFXApp3:
       FxProbe.onFx(shell.closeTerminal(w5))
       report("and closing the last one of all returns to the overview", state(shell).selection == Selection.Overview, summary(state(shell)))
 
+      // Behaviours 2, 4 and 5: the chords. They are heard on the scene, so a key the strip uses never
+      // reaches a terminal — neither the press nor the typed companion the platform sends with it — and
+      // the tmux-style prefix is the only thing to remember.
+      FxProbe.onFx(shell.shellState.windows.map(_.id).foreach(shell.closeTerminal))
+      val mac = Chords.isMacPlatform
+      report(
+        "a key the strip does not use goes on to the terminal",
+        !pressKey(window, delivered, KeyCode.X, character = Some("x")),
+        s"delivered: ${delivered.presses.get} presses, ${delivered.typed.get} typed"
+      )
+
+      val windowsBeforeChord = state(shell).windows.size
+      val openChordTaken = pressKey(window, delivered, KeyCode.T, control = !mac, alt = !mac, meta = mac)
+      val openedByChord = FxProbe.awaitTrue(state(shell).windows.size == windowsBeforeChord + 1, openSeconds)
+      report("the new-window chord opens a terminal and stops there", openChordTaken && openedByChord, summary(state(shell)))
+
+      // The prefix section works on two windows of its own — a window's position is its index — so
+      // `ctrl-b 0` and `ctrl-b 1` name different ones.
+      FxProbe.onFx(shell.shellState.windows.map(_.id).foreach(shell.closeTerminal))
+      val prefixFirst = openWindowId(shell)
+      val prefixSecond = openWindowId(shell)
+      val prefixTaken = pressKey(window, delivered, KeyCode.B, character = Some("\u0002"), control = true)
+      val zeroTaken = pressKey(window, delivered, KeyCode.DIGIT0, character = Some("0"))
+      report(
+        "ctrl-b 0 switches to the first window, eating both keystrokes",
+        prefixTaken && zeroTaken && state(shell).selection == Selection.Window(prefixFirst),
+        summary(state(shell))
+      )
+
+      val prefixTaken1 = pressKey(window, delivered, KeyCode.B, character = Some("\u0002"), control = true)
+      val oneTaken = pressKey(window, delivered, KeyCode.DIGIT1, character = Some("1"))
+      report(
+        "and ctrl-b 1 to the second",
+        prefixTaken1 && oneTaken && state(shell).selection == Selection.Window(prefixSecond),
+        summary(state(shell))
+      )
+
+      val windowsBeforeOutOfRange = state(shell).windows.map(_.id)
+      val outOfRangeTaken = pressKey(window, delivered, KeyCode.B, character = Some("\u0002"), control = true)
+      val eightTaken = pressKey(window, delivered, KeyCode.DIGIT8, character = Some("8"))
+      report(
+        "a digit with no window behind it is a consumed no-op",
+        outOfRangeTaken && eightTaken && state(shell).selection == Selection.Window(prefixSecond) &&
+          state(shell).windows.map(_.id) == windowsBeforeOutOfRange,
+        summary(state(shell))
+      )
+
+      val beforePrefixOpen = state(shell).windows.size
+      val prefixAgain = pressKey(window, delivered, KeyCode.B, character = Some("\u0002"), control = true)
+      val createTaken = pressKey(window, delivered, KeyCode.C, character = Some("c"))
+      val openedByPrefix = FxProbe.awaitTrue(state(shell).windows.size == beforePrefixOpen + 1, openSeconds)
+      report("ctrl-b c opens a terminal, typing no c", prefixAgain && createTaken && openedByPrefix, summary(state(shell)))
+
+      val windowsBeforeExpiry = state(shell).windows.size
+      val _ = pressKey(window, delivered, KeyCode.B, character = Some("\u0002"), control = true)
+      Thread.sleep(Chords.prefixNanos / 1_000_000 + 250)
+      val afterExpiry = pressKey(window, delivered, KeyCode.C, character = Some("c"))
+      report(
+        "the prefix times out, and the key after it goes to the terminal",
+        !afterExpiry && state(shell).windows.size == windowsBeforeExpiry,
+        summary(state(shell))
+      )
+
+      if mac then
+        val closing = state(shell).selection
+        val closeTaken = pressKey(window, delivered, KeyCode.W, meta = true)
+        val closed = closing match
+          case Selection.Window(id) => FxProbe.awaitTrue(!state(shell).windows.exists(_.id == id), openSeconds)
+          case Selection.Overview   => false
+        report("the close chord takes the window on screen", closeTaken && closed, summary(state(shell)))
+        report(
+          "a shifted open chord is not the open chord",
+          !pressKey(window, delivered, KeyCode.T, meta = true, shift = true) && state(shell).windows.size == windowsBeforeExpiry - 1,
+          summary(state(shell))
+        )
+      else println("SKIP  the close chord: upstream's cheat sheet has none off macOS — the tab's Close tab is the way")
+
+      // Behaviour 9: dragging a tab onto another reorders the windows, and the selection follows the
+      // tab that moved rather than the position it left.
+      FxProbe.onFx(shell.shellState.windows.map(_.id).foreach(shell.closeTerminal))
+      val first = openWindowId(shell)
+      val second = openWindowId(shell)
+      val third = openWindowId(shell)
+      FxProbe.onFx(shell.select(Selection.Window(second)))
+      val beforeDrag = state(shell).windows.map(_.id)
+      val (carriedProperly, faded) = dragTab(window, from = 2, to = 3)
+      val afterDrag = state(shell).windows.map(_.id)
+      report(
+        "dragging a tab onto another reorders the windows",
+        beforeDrag == Vector(first, second, third) && afterDrag == Vector(first, third, second) && carriedProperly,
+        s"${beforeDrag.mkString(", ")} -> ${afterDrag.mkString(", ")}"
+      )
+      report(
+        "the tab being carried fades while it is carried",
+        faded,
+        s"a carried tab fades to $carryingOpacity"
+      )
+      report(
+        "and the selected window follows its tab",
+        state(shell).selection == Selection.Window(second) && paneVisible(shell, second).contains(true),
+        summary(state(shell))
+      )
+
+      // A carry that lands back where it started is not a move, so it must not eat the next click:
+      // `suppressClick` is only set when a window actually moved.
+      val carriedBack = FxProbe.onFx {
+        val tabs = tabNodes(window)
+        val source = tabs(1)
+        val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_PRESSED, MouseButton.PRIMARY, source))
+        val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_DRAGGED, MouseButton.PRIMARY, tabs(2)))
+        val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_RELEASED, MouseButton.PRIMARY, source))
+        !source.getStyleClass.contains("dragging")
+      }
+      val clickedAfterCarry = clickTab(window, 2)
+      report(
+        "a carry that lands back on its own tab leaves the next click working",
+        carriedBack && clickedAfterCarry && state(shell).selection == Selection.Window(third),
+        summary(state(shell))
+      )
+
+      // A render that arrives during a carry waits for it: rebuilding the strip would detach the nodes
+      // the gesture is grabbing, and the release would land in nothing. A background shell writing
+      // output is the realistic way for one to arrive.
+      FxProbe.onFx(shell.shellState.windows.map(_.id).foreach(shell.closeTerminal))
+      val quiet = openWindowId(shell)
+      val away = openWindowId(shell)
+      val somewhere = openWindowId(shell)
+      FxProbe.onFx(shell.select(Selection.Window(somewhere)))
+      val nodeDuringCarry = FxProbe.onFx(System.identityHashCode(tabNodes(window)(1)))
+      val carrying = beginCarry(window, from = 1, to = 2)
+      typeOn(shell, quiet, "echo CORVI_DRAG_$((6*7))_OK")
+      val waited = FxProbe.awaitTrue(
+        state(shell).window(quiet).exists(_.activity == TerminalWindow.Activity.Unseen) &&
+          bellCount(window) == 0 &&
+          FxProbe.onFx(System.identityHashCode(tabNodes(window)(1))) == nodeDuringCarry,
+        openSeconds
+      )
+      val beforeFlush = state(shell).windows.map(_.id)
+      val dropped = releaseCarry(window, from = 1, onto = 2)
+      val flushed = FxProbe.awaitTrue(
+        bellCount(window) == 1 && state(shell).windows.map(_.id) == Vector(away, quiet, somewhere),
+        openSeconds
+      )
+      report(
+        "a render that arrives during a carry waits for the release, then lands",
+        carrying && waited && dropped && flushed,
+        s"${beforeFlush.mkString(", ")} -> ${state(shell).windows.map(_.id).mkString(", ")}"
+      )
+
       // Ending the session's own life: `shutdown` takes every shell and every emulator thread with it.
+      // One shell per window, and the shells of windows already closed are gone rather than still being
+      // reaped — otherwise the count below is a race.
+      val settled = FxProbe.awaitTrue(LiveProcesses.childShells.size == state(shell).windows.size, openSeconds)
+      val shellsOpen = LiveProcesses.childShells.size
       FxProbe.onFx(shell.openTerminal())
       FxProbe.onFx(shell.openTerminal())
-      val reopened = FxProbe.awaitTrue(LiveProcesses.childShells.size == 2, openSeconds)
-      report("the shell opens terminals again after the well is empty", reopened, s"child shells: ${LiveProcesses.childShells.size}")
+      val reopened = FxProbe.awaitTrue(LiveProcesses.childShells.size == shellsOpen + 2, openSeconds)
+      report(
+        "the shell opens a terminal per window, and again after the well is empty",
+        settled && reopened,
+        s"child shells: ${LiveProcesses.childShells.size}"
+      )
       FxProbe.onFx(shell.shutdown())
       val shellsGone = FxProbe.awaitTrue(LiveProcesses.childShells.isEmpty, 10)
       report("shutdown ends every session's shell", shellsGone, LiveProcesses.childShells.map(_.pid.toString).mkString(", "))
@@ -344,6 +520,68 @@ private[corvi] object TabsProbeMain extends JFXApp3:
       val owner = window.stage.delegate.getScene.getFocusOwner
       (panes :+ s"focus: ${if owner == null then "none" else owner.getClass.getSimpleName}").mkString("; ")
     }
+
+  /** Fires a keystroke the way the keyboard does: the press, and the `KEY_TYPED` the platform sends with it when the key types. Answers
+    * whether the strip took the whole thing — a press it consumes does not by itself stop the typed, which is what used to type a `c` into
+    * the shell.
+    */
+  private def pressKey(
+      window: ProbeWindow,
+      delivered: Delivered,
+      code: KeyCode,
+      character: Option[String] = None,
+      control: Boolean = false,
+      alt: Boolean = false,
+      meta: Boolean = false,
+      shift: Boolean = false
+  ): Boolean =
+    FxProbe.onFx {
+      val scene = window.stage.delegate.getScene
+      val target = Option(scene.getFocusOwner).filter(owner => owner.getScene == scene).getOrElse(scene.getRoot)
+      val pressesBefore = delivered.presses.get
+      val typedBefore = delivered.typed.get
+      val event = new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, shift, control, alt, meta)
+      val _ = javafx.event.Event.fireEvent(target, event)
+      character.foreach { typed =>
+        val companion = new KeyEvent(KeyEvent.KEY_TYPED, typed, "", KeyCode.UNDEFINED, false, false, false, false)
+        val _ = javafx.event.Event.fireEvent(target, companion)
+      }
+      delivered.presses.get == pressesBefore && (character.isEmpty || delivered.typed.get == typedBefore)
+    }
+
+  /** Puts a tab under the pointer: press on it, then move onto another tab, which is where carrying starts. Answers whether the carry
+    * started, read in the same FX turn so the fade is the one the handler set rather than one a later pulse resolved.
+    */
+  private def beginCarry(window: ProbeWindow, from: Int, to: Int): Boolean =
+    FxProbe.onFx {
+      val tabs = tabNodes(window)
+      val source = tabs(from)
+      val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_PRESSED, MouseButton.PRIMARY, source))
+      val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_DRAGGED, MouseButton.PRIMARY, tabs(to)))
+      source.getStyleClass.contains("dragging")
+    }
+
+  /** Releases a drag where the pointer is, answering whether the carried tab's fade is gone with it. */
+  private def releaseCarry(window: ProbeWindow, from: Int, onto: Int): Boolean =
+    FxProbe.onFx {
+      val tabs = tabNodes(window)
+      val source = tabs(from)
+      val _ = source.fireEvent(mouseEvent(MouseEvent.MOUSE_RELEASED, MouseButton.PRIMARY, tabs(onto)))
+      !source.getStyleClass.contains("dragging")
+    }
+
+  /** Drags a tab onto another in one go, answering whether the carry started cleanly and whether the fade it asked for is the one the CSS
+    * resolved.
+    */
+  private def dragTab(window: ProbeWindow, from: Int, to: Int): (Boolean, Boolean) =
+    val carrying = beginCarry(window, from, to)
+    val faded = FxProbe.awaitTrue(tabOpacity(window, from).contains(carryingOpacity), 10)
+    val dropped = releaseCarry(window, from, to)
+    (carrying && dropped, faded)
+
+  /** What a tab's node has actually been faded to; `None` if there is no such tab. */
+  private def tabOpacity(window: ProbeWindow, index: Int): Option[Double] =
+    FxProbe.onFx(tabNodes(window).lift(index).map(_.getOpacity))
 
   /** Clicks a tab the way a user does: a real mouse event at the node, so the strip's own wiring runs rather than the shell's method.
     */

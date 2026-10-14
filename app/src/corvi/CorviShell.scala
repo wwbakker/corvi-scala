@@ -3,6 +3,7 @@ package corvi
 import corvi.terminal.TerminalSession
 import java.nio.file.{Path, Paths}
 import javafx.application.Platform
+import javafx.scene.input.KeyEvent
 import scalafx.beans.property.ObjectProperty
 import scalafx.geometry.Pos
 import scalafx.scene.control.Label
@@ -25,8 +26,20 @@ private[corvi] final class CorviShell:
     selectOverview = () => select(Selection.Overview),
     selectWindow = id => select(Selection.Window(id)),
     closeWindow = closeTerminal,
-    openWindow = () => openTerminal()
+    openWindow = () => openTerminal(),
+    moveWindow = (from, to) => update(_.moved(from, to)),
+    dragging = drag => noteDrag(drag)
   )
+
+  /** The chord state: the tmux-style prefix is all there is to remember. It lives in its own holder because a key press must not re-render
+    * the strip.
+    */
+  private val chords: ObjectProperty[Chords.State] = ObjectProperty(Chords.initial)
+
+  /** The strip's drag, and whether a render is waiting for it. FX-thread-only, and apart from `ShellState` because a drag must not
+    * re-render: rebuilding the strip would detach the very nodes the gesture is grabbing, and the release would land in nothing.
+    */
+  private val dragging: ObjectProperty[CorviShell.DragRender] = ObjectProperty(CorviShell.DragRender.idle)
 
   /** The strip is rebuilt from the state, so it lives in a one-child host that the render swaps. */
   private val stripHost: VBox = new VBox
@@ -87,6 +100,27 @@ private[corvi] final class CorviShell:
       session.close()
     }
 
+  /** Takes a key press for the strip's chords, answering whether it is consumed. The scene's filter (see `AppWindow`) runs this before
+    * anything else, so the keys the strip uses never reach a shell.
+    */
+  /** Whether a `KEY_TYPED` belongs to a key the strip already took. Consuming a press does not stop the typed the platform sends with it,
+    * so this is what keeps `ctrl-b c` from typing a `c` into the terminal it is leaving. The scene's other filter (`AppWindow`) runs this.
+    */
+  def typedKey(): Boolean =
+    val (next, swallow) = Chords.typed(chords.value)
+    chords.value = next
+    swallow
+
+  def chord(event: KeyEvent): Boolean =
+    val (next, outcome) = Chords.press(chords.value, event, Chords.isMacPlatform, System.nanoTime())
+    chords.value = next
+    outcome match
+      case Chords.Outcome.Passed        => false
+      case Chords.Outcome.PrefixArmed   => true
+      case Chords.Outcome.Open          => openTerminal(); true
+      case Chords.Outcome.CloseSelected => closeSelected(); true
+      case Chords.Outcome.Select(index) => selectNumber(index); true
+
   /** Ends every session — the app's quit runs this before the toolkit goes. */
   def shutdown(): Unit = state.value.sessions.values.foreach(_.close())
 
@@ -98,6 +132,29 @@ private[corvi] final class CorviShell:
     */
   def terminalHasOutput: Boolean = state.value.selectedSession.exists(_.screenText.exists(!_.isWhitespace))
 
+  /** Closes the window on screen; the overview has nothing to close. */
+  private def closeSelected(): Unit =
+    state.value.selection match
+      case Selection.Window(id) => closeTerminal(id)
+      case Selection.Overview   => ()
+
+  /** The `ctrl-b <n>` chord: windows count from zero, as upstream's tabs and tmux count them. A number with no window behind it is a
+    * consumed no-op.
+    */
+  private def selectNumber(index: Int): Unit =
+    state.value.windows.lift(index).foreach(window => select(Selection.Window(window.id)))
+
+  /** The strip saying which drag it is running: nothing re-renders while one is carried, and the render that had to wait runs the moment it
+    * ends — with the move it was waiting for already applied.
+    */
+  private def noteDrag(drag: WindowTabs.Drag): Unit =
+    val wasCarrying = dragging.value.drag != WindowTabs.Drag.Idle
+    if wasCarrying && drag == WindowTabs.Drag.Idle then
+      val waiting = dragging.value.renderWaiting
+      dragging.value = CorviShell.DragRender.idle
+      if waiting then rebuild(state.value)
+    else dragging.value = CorviShell.DragRender(drag, dragging.value.renderWaiting)
+
   /** Applies a pure transition. FX-thread-only, like everything that touches `state`. */
   private def update(transition: ShellState => ShellState): Unit = state.value = transition(state.value)
 
@@ -105,6 +162,13 @@ private[corvi] final class CorviShell:
     * stay mounted, so their shells keep running.
     */
   private def render(current: ShellState): Unit =
+    if dragging.value.drag == WindowTabs.Drag.Idle then rebuild(current)
+    else dragging.value = dragging.value.copy(renderWaiting = true)
+
+  /** The strip and the well follow the state: the strip is rebuilt (cheap at this scale), and the panes are only shown or hidden — they
+    * stay mounted, so their shells keep running.
+    */
+  private def rebuild(current: ShellState): Unit =
     stripHost.children = Seq(WindowTabs.strip(current.selection, current.windows, actions))
     overview.visible = current.selection == Selection.Overview
     current.windows.foreach { window =>
@@ -119,6 +183,12 @@ private[corvi] final class CorviShell:
     catch case _: IllegalStateException => ()
 
 private[corvi] object CorviShell:
+  /** What the shell knows about a strip drag: the gesture, and whether a render had to wait for it. */
+  final case class DragRender(drag: WindowTabs.Drag, renderWaiting: Boolean)
+
+  object DragRender:
+    val idle: DragRender = DragRender(WindowTabs.Drag.Idle, renderWaiting = false)
+
   /** What a fresh window is called: Corvi's tabs carry the window's own name, and a plain shell has none to carry.
     */
   private def windowLabel(id: Int): String = s"terminal ${id + 1}"

@@ -1,6 +1,7 @@
 package corvi
 
 import javafx.application.Platform
+import javafx.scene.input.KeyEvent
 import scalafx.Includes.*
 import scalafx.application.JFXApp3.PrimaryStage
 import scalafx.scene.Scene
@@ -16,8 +17,21 @@ private[corvi] object AppWindow:
     */
   def scene(shell: CorviShell): Scene =
     val stylesheet: String = getClass.getResource("/corvi.css").toExternalForm
-    new Scene(shell.root):
+    val scene = new Scene(shell.root):
       val _ = stylesheets += stylesheet
+    // The strip's chords are heard on the way down, before any node: a key the strip uses is consumed
+    // here, so it never reaches a terminal.
+    val _ = scene.delegate.addEventFilter(
+      KeyEvent.KEY_PRESSED,
+      (event: KeyEvent) => if shell.chord(event) then event.consume()
+    )
+    // The typed companion of a consumed press arrives anyway — the platform sends both for one
+    // keystroke — so it needs swallowing separately, or `ctrl-b c` types a `c` into the shell.
+    val _ = scene.delegate.addEventFilter(
+      KeyEvent.KEY_TYPED,
+      (event: KeyEvent) => if shell.typedKey() then event.consume()
+    )
+    scene
 
   /** The primary stage around a scene; `onClose` runs when the window is asked to close. */
   def stage(window: Scene, onClose: () => Unit): PrimaryStage =

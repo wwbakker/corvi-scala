@@ -78,6 +78,17 @@ private[corvi] final case class ShellState(
         if window.state == TerminalWindow.State.Ended then window else window.copy(activity = TerminalWindow.Activity.Unseen)
       }
 
+  /** A dragged tab landed on another: the window carried takes that position, and the ones between it shift along. The selection is kept by
+    * window, so it follows the tab that moved. A drop on itself, or on a window that is not there, changes nothing.
+    */
+  def moved(from: Int, to: Int): ShellState =
+    val fromIndex = windows.indexWhere(_.id == from)
+    val toIndex = windows.indexWhere(_.id == to)
+    if fromIndex < 0 || toIndex < 0 || fromIndex == toIndex then this
+    else
+      val carried = windows(fromIndex)
+      copy(windows = windows.patch(fromIndex, Nil, 1).patch(toIndex, Seq(carried), 0))
+
   /** The shell exited: the window says so, and stops asking for attention. */
   def ended(id: Int): ShellState =
     update(id)(window => window.copy(state = TerminalWindow.State.Ended, activity = TerminalWindow.Activity.Quiet))
