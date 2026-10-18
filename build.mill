@@ -61,3 +61,56 @@ object app extends ScalaModule:
     Seq("web", "swing")
       .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
   }
+
+/** The DTOs the host and the future UI share. Pure data: no JavaFX, no Kyo, no terminal engine. */
+object contract extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    // The DTOs are compared as whole values (a row against the row it was), so they say so explicitly.
+    "-language:strictEquality",
+    // A match over one of these enums has to be exhaustive: a new case must break the build, not throw inside a callback.
+    "-Wconf:msg=match may not be exhaustive:e"
+  )
+
+/** The headless terminal host: PTYs and the VT emulator, no JavaFX. Kyo owns its concurrency. */
+object host extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def moduleDeps = Seq(contract)
+  def mainClass = Some("corvi.host.HostProbe")
+
+  // Kyo requires these: it returns values that must not be silently discarded, and it relies on
+  // strict equality. `kyo-jsonrpc` and `kyo-system` arrive with the protocol phase, when they are used.
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    // `-Wconf` filters are one option, first match wins: Kyo's macro expansion carries `@nowarn` annotations that no
+    // longer suppress anything, and `-Wunused:all` reports each of them. They are generated code, not ours.
+    "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+      "msg=(unused.*value|discarded.*value|pure.*statement):error," +
+      // As above: an enum from the engine gaining a case has to fail the build here, not crash a live session.
+      "msg=match may not be exhaustive:e",
+    "-language:strictEquality",
+    // Kyo's `A < S` values are inline-heavy: a probe with a dozen nested for-comprehensions needs more inlining fuel
+    // than the compiler's default budget.
+    "-Xmax-inlines:128"
+  )
+
+  // The reader fiber parks in a blocking PTY read on purpose (there is no non-blocking read for a pty without a
+  // selector pump, which would put a second thread between the bytes and the parser). Kyo's scheduler parks a
+  // virtual thread for it and its BlockingMonitor compensates by not counting it as busy - hence both flags.
+  def forkArgs = Seq(
+    "-Dkyo.scheduler.virtualizeWorkers=true",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED"
+  )
+
+  def mvnDeps = Task {
+    Seq(
+      mvn"io.getkyo::kyo-core:1.0.0-RC7",
+      mvn"com.techsenger.jeditermfx:jeditermfx-core:1.1.0",
+      mvn"org.jetbrains.pty4j:pty4j:0.14.0"
+    )
+  }
