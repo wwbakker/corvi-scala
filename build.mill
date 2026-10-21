@@ -75,10 +75,12 @@ object contract extends ScalaModule:
     "-Wconf:msg=match may not be exhaustive:e"
   )
 
-/** The headless terminal host: PTYs and the VT emulator, no JavaFX. Kyo owns its concurrency. */
+/** The headless terminal host: PTYs and the VT emulator, no JavaFX. Kyo owns its concurrency. It depends on `protocol` for the routes it
+  * answers: the client half of the protocol does not depend on this module, so a UI build does not pull pty4j or jeditermfx in.
+  */
 object host extends ScalaModule:
   def scalaVersion = "3.10.0"
-  def moduleDeps = Seq(contract)
+  def moduleDeps = Seq(contract, protocol)
   def mainClass = Some("corvi.host.HostProbe")
 
   // Kyo requires these: it returns values that must not be silently discarded, and it relies on
@@ -90,7 +92,8 @@ object host extends ScalaModule:
     // `-Wconf` filters are one option, first match wins: Kyo's macro expansion carries `@nowarn` annotations that no
     // longer suppress anything, and `-Wunused:all` reports each of them. They are generated code, not ours.
     "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
-      "msg=(unused.*value|discarded.*value|pure.*statement):error," +
+      "msg=unused:e," +
+      "msg=(discarded.*value|pure.*statement):error," +
       // As above: an enum from the engine gaining a case has to fail the build here, not crash a live session.
       "msg=match may not be exhaustive:e",
     "-language:strictEquality",
@@ -112,5 +115,33 @@ object host extends ScalaModule:
       mvn"io.getkyo::kyo-core:1.0.0-RC7",
       mvn"com.techsenger.jeditermfx:jeditermfx-core:1.1.0",
       mvn"org.jetbrains.pty4j:pty4j:0.14.0"
+    )
+  }
+
+/** The wire and the client half of it: typed `kyo-jsonrpc` routes, schemas, typed errors, and `TerminalService` over a peer handler. It
+  * depends on `contract` and nothing else of ours, so the renderer and the UI can take it without pulling the terminal engine in.
+  */
+object protocol extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def moduleDeps = Seq(contract)
+
+  // The same Kyo flags as the host: `A < S` values are inline-heavy, and the engine's enums must stay exhaustively matched.
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    // The same promotions the host uses: an unused import is an error here too, which is how the two unused ones this module
+    // shipped with would have been caught.
+    "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+      "msg=unused:e," +
+      "msg=(discarded.*value|pure.*statement):error," +
+      "msg=match may not be exhaustive:e",
+    "-language:strictEquality",
+    "-Xmax-inlines:128"
+  )
+
+  def mvnDeps = Task {
+    Seq(
+      mvn"io.getkyo::kyo-jsonrpc:1.0.0-RC7"
     )
   }

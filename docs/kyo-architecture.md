@@ -55,17 +55,94 @@ The **host interprets the terminal**; the frontend only renders it.
   from the most recent.
 - `session.key(id, keyCode, modifiers, text)` / `session.mouse(...)` / `session.resize(id, cols, rows)`
   — the host owns key/mouse encoding (`TerminalKeyEncoder`) because it knows the terminal modes.
-- `session.exited(id, code)`, `sessions.list`, `session.create`, `session.close`.
+- `session.ended(id, ended)` — once per attached client: `closed` says who ended it, `code` is
+  advisory, `reason` carries a reader failure. `sessions.list`, `session.create`, `session.close`.
 - Base64 cell payloads first; a compact binary framing can replace them later without changing
   the routes.
+
+### Protocol layer as built
+
+`protocol` holds the wire and both sides of it, over `kyo-core` + `kyo-jsonrpc`:
+
+- **Routes**: names in `Methods`, params in `Messages`, and the client's two notification routes in
+  `ClientRoutes` — all in `protocol`. The host's answering routes are `HostRoutes` in `host`,
+  because they need the live sessions. `session.text`/`session.resize` are requests, not
+  notifications: a client wants to know when the host no longer has the session. `text` is
+  paste-only for now; `session.key`/`session.mouse` arrive with the renderer, which owns the event
+  model, and the host will encode them because it knows the modes.
+- **`protocol` depends on `contract` and `kyo-jsonrpc` only**; `host` depends on `protocol`. A UI
+  build therefore takes the client half without pty4j, jeditermfx or the host's JVM flags. For the
+  same reason the protocol probe lives in `host` (`corvi.host.ProtocolProbe`): it needs real shells.
+- DTOs stay in `contract`; their codecs are `Schema.derived` givens in `Schemas` (with hand-written
+  transforms for the opaque ids) so no kyo type appears in `contract`.
+- **Errors are typed**: `UnknownSession`, `SessionFailed`, `SessionEnded` and `ClientAlreadyBound`
+  are `JsonRpcApplicationError`s with codes outside the implementation range (4001-4004), registered
+  with `.error[E](code, message)`. The mapping encodes the value into the error's `data`, and the
+  client decodes it back, so `client.attach(closedId)` aborts with `UnknownSession(id)` rather than
+  a message.
+- **Host service** (`HostSessions`, in `host`): the registry of live `HostSession`s. A request
+  handler has no `Scope`, so each session is opened inside a scope of its own in an unscoped fiber
+  and closed by completing a latch that scope waits on; a shell that cannot start publishes the
+  failure, which the caller sees as `SessionFailed` instead of a timeout. (`TerminalStarter` was
+  avoided for the same reason; this is the structured-concurrency shape it buys, and the version
+  that moves it into a `KyoApp` scope belongs to the host phase.)
+- **Registration is per client**: `ClientId` → peer handler, plus each client's own **baseline
+  frame** per session. Damage is computed per client, `frameSince(thatClientBaseline)`, and the
+  baseline advances only once the delta has actually been sent. A single session-wide baseline would
+  let a delta computed over a window that straddled an attach be delivered after the client seeded
+  its frame, and since damage is absolute, applying it would overwrite newer state with older.
+  An attach is authoritative for a client with no frame yet; re-attaching a client that already has
+  one leaves its baseline alone, because resetting it would take in-flight deltas out of its history
+  and rewind an absolute frame for good. (A frame sequence number on `Damage` would make re-attach
+  self-healing; it is not needed while attach only happens at start and on reconnect, which is a new
+  client.) Client ids are unique per connection (`client-1`, `client-2`, …) and a duplicate `bind` is
+  refused rather than replacing the other peer.
+- **Pushes**: one loop per session samples every `pushInterval` (an `init` parameter; the probes run
+  at 200 ms, the host at 16 ms) and sends a delta only when one is non-empty, and only to clients
+  that attached — a session nobody is watching is not even sampled. Sampling *is* the coalescer:
+  everything since the previous tick leaves as one delta, and an unchanged frame costs nothing on
+  the wire. Waking the loop from the reader (a `Channel`/`Signal` per session, once the host is a
+  `KyoApp`) is a later refinement; the current loops use `Fiber.initUnscoped` because a route handler
+  has no scope.
+- **Client** (`TerminalService`): UI-free, no `kyo-jsonrpc` in its signatures, with a `FrameSink` for
+  the two pushes. `TerminalPeers.inMemory` wires a host peer and a client peer over
+  `JsonRpcTransport.inMemory`; the Unix-socket phase replaces only the transport.
+- **Frame consumer** (`contract.Frame`): `Frame.from(snapshot)` and `frame.apply(damage)`;
+  `Damage.applyTo` is defined in terms of it, so host and renderer cannot disagree about a delta.
+  `Snapshot` carries the theme, so a client that only attached can draw everything.
+
+### Damage is absolute and idempotent
+
+Every row a delta carries is a row's whole contents, and applying a delta twice gives the same frame
+as applying it once. Two rules follow, and both are load-bearing:
+
+- A delta that changes `size` carries **every** row of the new grid. The row indexes have moved, so
+  a row with the same contents at the same index is still drawn in a place that now means something
+  else; a same-width height change that sent only differing rows would blank the surviving ones.
+- A row outside the frame's range is dropped, not thrown: a stale delta after a shrink is expected
+  traffic, not a client bug.
+
+### Ending a session
+
+`session.ended(id, ended)` is sent once per attached client, with `closed` saying who ended it,
+`code` (advisory — a host-initiated close reports whatever the PTY made of the signal) and `reason`
+for a reader failure. The session then **stays listed with `running = false`**, so a tab can show
+its final screen and the client can still read history; `session.close` is what removes it, and
+`session.text`/`session.resize` on it fail with the typed `SessionEnded`. Reaping ended sessions on
+a timer is a host-phase decision, not this one.
+
+Still planned, not built: `Channel`/`Signal` between the reader and the push loops, `session.key`
+and `session.mouse`, a supervisor fiber per host with its own scope, and the ended-session reap
+policy.
 
 ## Modules (Mill)
 
 ```
-contract   SessionId, SessionInfo, TermSize, TerminalTheme, Snapshot/Damage DTOs, TerminalService, TerminalView
-protocol   kyo-jsonrpc routes and wire codecs; depends on contract
-host       KyoApp: PTY + jeditermfx-core emulator + registry + protocol server; depends on protocol
-renderer   thin JavaFX Canvas: Snapshot/Damage → cells, cursor, selection, scrollback; depends on contract
+contract   SessionId, SessionInfo, TermSize, TerminalTheme, Snapshot/Damage DTOs, Frame (the pure consumer), TerminalView
+protocol   kyo-jsonrpc route names, schemas, typed errors, ClientRoutes, TerminalService/FrameSink/TerminalClient; depends on contract
+host       PTY + jeditermfx-core emulator, HostSession, HostSessions (registry + push loops), HostRoutes, in-memory wiring, probes;
+           depends on contract and protocol
+renderer   thin JavaFX Canvas: Snapshot/Damage → cells, cursor, selection, scrollback; depends on contract and protocol
 ui         shell/tabs/sidebar/state/chords; depends on contract (+ renderer's view factory)
 app        composition root: ensure host, connect, build the UI, launch JavaFX
 ```
@@ -74,9 +151,11 @@ The UI is testable with a fake `TerminalService`; the host and renderer are test
 
 ## Kyo
 
-- Host: `KyoApp`, `Scope.run`, `Scope.acquireRelease` for PTYs, one `Fiber.init` per session
-  reader, `Channel` for output, `AtomicRef`/STM for the registry, `Signal` for session changes,
-  `kyo-jsonrpc` for the server, `kyo-system` for process/path helpers.
+- Host, as built: `Scope.run` for the host's lifetime, one `Fiber.initUnscoped` per session (the
+  session's own scope inside it) and one more per session's push loop, `AtomicRef`/`AtomicInt` for
+  the registry and the per-client baselines, `kyo-jsonrpc` for the peers. Planned for the host
+  phase: a `KyoApp` supervisor whose scope owns the sessions, `Channel`/`Signal` to wake the push
+  loops instead of sampling, and `kyo-system` for process/path helpers.
 - **The reader fiber is deliberately a blocking-FFI fiber.** A pty has no non-blocking read
   without a selector pump, and a pump would put a second thread between the bytes and the
   parser for no gain; so the fiber parks in `read` for the session's life. It is started with

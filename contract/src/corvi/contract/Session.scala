@@ -16,13 +16,16 @@ object SessionId:
 /** The terminal's grid, in cells. */
 final case class TermSize(cols: Int, rows: Int) derives CanEqual
 
-/** What the host knows about a session without sending its screen: enough for a tab strip, and the theme the renderer draws cells with. The
-  * title is not here: it changes with the terminal's state, so it is part of `Modes` and arrives with a frame.
+/** What the host knows about a session without sending its screen: enough for a tab strip.
+  *
+  * `index` is the order the host created sessions in, which is the order a tab strip shows them: sorting by id would put `session-10`
+  * before `session-2`. The client should draw from a `Snapshot` rather than from this: the title, the theme and the cells all live in the
+  * frame.
   */
 final case class SessionInfo(
     id: SessionId,
+    index: Int,
     size: TermSize,
     historyRows: Int,
-    theme: TerminalTheme,
     running: Boolean
 ) derives CanEqual

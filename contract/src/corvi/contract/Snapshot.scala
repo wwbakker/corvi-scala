@@ -1,7 +1,7 @@
 package corvi.contract
 
-/** The visible screen as the host last read it: the grid, the cursor, the modes, and how much history is behind it. The frontend draws this
-  * and nothing else.
+/** The visible screen as the host last read it: the grid, the cursor, the modes, how much history is behind it, and the colours it falls
+  * back on. A client that has only attached can draw everything from this.
   */
 final case class Snapshot(
     id: SessionId,
@@ -9,7 +9,8 @@ final case class Snapshot(
     rows: Vector[Row],
     cursor: Cursor,
     modes: Modes,
-    historyRows: Int
+    historyRows: Int,
+    theme: TerminalTheme
 ) derives CanEqual
 
 /** One visible row that changed, and what it changed to. */
@@ -20,8 +21,11 @@ final case class RowDamage(row: Int, cells: Row) derives CanEqual
   *
   * Rows alone are not a frame delta. A cursor move, a mode toggle (mouse reporting, bracketed paste, the alternate screen), a shell's title
   * change and history growth all change what a client draws or sends while leaving every cell alone, so a damage that carried only rows
-  * would leave a client permanently behind. `size` is here for the same reason: after a resize the row indexes mean a different grid, so a
-  * client that sees it takes a fresh snapshot instead of patching one.
+  * would leave a client permanently behind.
+  *
+  * A delta is *absolute*: every row it carries is the row's whole contents, and applying it twice gives the same frame as applying it once.
+  * That only works if the rows it carries are the rows that exist, so a delta that changes `size` carries **every** row of the new grid -
+  * the row indexes have moved, and a surviving row that is not resent would keep contents that no longer belong to it.
   */
 final case class Damage(
     rows: Vector[RowDamage],
@@ -32,21 +36,10 @@ final case class Damage(
 ) derives CanEqual:
   def isEmpty: Boolean = rows.isEmpty && size.isEmpty && cursor.isEmpty && modes.isEmpty && historyRows.isEmpty
 
-  /** The frame this delta describes, given the frame it was taken against. This is the host's own definition of a delta, so a client that
-    * applies damage this way holds the same screen the host does without asking for another snapshot.
+  /** The frame this delta describes, given the frame it was taken against. The definition lives in `Frame`, which is the type a client
+    * holds, so the host's idea of a delta and a renderer's cannot drift apart.
     */
-  def applyTo(before: Snapshot): Snapshot =
-    val target = size.getOrElse(before.size)
-    // A resize re-indexes the grid: the base is the new shape, and the rows it carries are the ones the host says are visible now.
-    val base = if target == before.size then before.rows else Vector.fill(target.rows)(Row(Vector.empty))
-    Snapshot(
-      id = before.id,
-      size = target,
-      rows = rows.foldLeft(base)((current, change) => current.updated(change.row, change.cells)),
-      cursor = cursor.getOrElse(before.cursor),
-      modes = modes.getOrElse(before.modes),
-      historyRows = historyRows.getOrElse(before.historyRows)
-    )
+  def applyTo(before: Snapshot): Snapshot = Frame.from(before).apply(this).snapshot
 
 object Damage:
   val none: Damage = Damage(Vector.empty, None, None, None, None)

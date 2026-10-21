@@ -4,6 +4,8 @@ import com.techsenger.jeditermfx.core.emulator.mouse.MouseMode as EngineMouseMod
 import corvi.contract.*
 import java.nio.file.Paths
 import kyo.*
+// The contract has a `Frame` as well (a client's screen); this file means kyo's source position, so it says so.
+import kyo.Frame
 import scala.concurrent.duration.*
 
 /** The host's regression suite: login shells on real PTYs, driven headlessly, with everything asserted from the snapshots, deltas and
@@ -34,7 +36,7 @@ object HostProbe:
   private def probe(using Frame): Int < (Async & Scope & Abort[Any]) =
     val reporter = Reporter()
     for
-      session <- HostSession.open(SessionId("probe"), Paths.get(sys.props("user.dir")))
+      session <- HostSession.open(SessionId("probe"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
       _ <- screenChecks(session, reporter)
       _ <- sizeAndScrollbackChecks(session, reporter)
       _ <- modeChecks(session, reporter)
@@ -67,7 +69,7 @@ object HostProbe:
       _ = report(
         "the session's info carries its size, theme and liveness",
         info.size == TermSize(80, 24) && info.running && info.historyRows >= 0 &&
-          info.theme.foreground == Rgb(230, 237, 243) && info.theme.background == Rgb(13, 17, 23),
+          prompt.theme.foreground == Rgb(230, 237, 243) && prompt.theme.background == Rgb(13, 17, 23),
         s"info $info"
       )
 
@@ -339,6 +341,19 @@ object HostProbe:
         resizeDelta.size.contains(resizedTo) && resizeDelta.applyTo(resizeBaseline) == resizedFrame,
         s"size ${resizeDelta.size}, ${resizeDelta.rows.size} rows"
       )
+
+      // A height-only resize re-indexes the rows too: the delta has to carry every one of them, or a client applying it would blank the rows
+      // that survived, which is exactly the bug this check exists for.
+      sameWidthBaseline = session.snapshot()
+      taller = TermSize(cols = sameWidthBaseline.size.cols, rows = sameWidthBaseline.size.rows + 8)
+      _ = session.resize(taller)
+      _ <- await(session)(snapshot => snapshot.size == taller)
+      (grownFrame, grownDelta) = session.frameSince(sameWidthBaseline)
+      _ = report(
+        "a same-width resize damages every row",
+        grownDelta.size.contains(taller) && grownDelta.rows.size == taller.rows && grownDelta.applyTo(sameWidthBaseline) == grownFrame,
+        s"${grownDelta.rows.size} rows of ${taller.rows}, applying it gives ${grownFrame.rows.size} rows: ${grownDelta.applyTo(sameWidthBaseline) == grownFrame}"
+      )
     yield ()
 
   /** Two sessions at once, and a session closed by hand. */
@@ -347,7 +362,7 @@ object HostProbe:
   ): Unit < (Async & Scope & Abort[Any]) =
     val report = reporter.report
     for
-      other <- HostSession.open(SessionId("other"), Paths.get(sys.props("user.dir")))
+      other <- HostSession.open(SessionId("other"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
       _ = session.write("echo ONLY_IN_ONE\n")
       _ = other.write("echo ONLY_IN_TWO\n")
       inOne <- await(session)(snapshot => lines(snapshot).contains("ONLY_IN_ONE"))
@@ -406,7 +421,7 @@ object HostProbe:
   private def closedByScope(using Frame): Boolean < (Async & Abort[Any]) =
     Scope.run {
       for
-        temporary <- HostSession.open(SessionId("scoped"), Paths.get(sys.props("user.dir")))
+        temporary <- HostSession.open(SessionId("scoped"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
         _ <- await(temporary)(snapshot => text(snapshot).trim.nonEmpty)
         _ <- Sync.defer(temporary.close())
         // The scope closes *after* the body, so the shell has to be gone before this reads it: the point of the check is that closing
@@ -421,7 +436,7 @@ object HostProbe:
   private def exitsOnItsOwn(using Frame): (Boolean, Boolean) < (Async & Abort[Any]) =
     Scope.run {
       for
-        temporary <- HostSession.open(SessionId("exits"), Paths.get(sys.props("user.dir")))
+        temporary <- HostSession.open(SessionId("exits"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
         _ <- await(temporary)(snapshot => text(snapshot).trim.nonEmpty)
         _ <- Sync.defer(temporary.write("exit\n"))
         _ <- awaitCondition(10.seconds)(() => !temporary.info.running)
@@ -432,7 +447,7 @@ object HostProbe:
   private def historyGrowthDelta(using Frame): Boolean < (Async & Abort[Any]) =
     Scope.run {
       for
-        temporary <- HostSession.open(SessionId("growing"), Paths.get(sys.props("user.dir")))
+        temporary <- HostSession.open(SessionId("growing"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
         _ <- await(temporary)(snapshot => text(snapshot).trim.nonEmpty)
         baseline = temporary.snapshot()
         _ <- Sync.defer(temporary.write("seq 1 200\n"))
@@ -507,10 +522,10 @@ object HostProbe:
 
   /** The first snapshot satisfying `holds`, or the last one when the deadline passes. */
   private def await(session: HostSession)(holds: Snapshot => Boolean)(using Frame): Snapshot < Async =
-    val deadline = System.nanoTime() + waitTimeout.toNanos
+    val deadline = java.lang.System.nanoTime() + waitTimeout.toNanos
     def loop(): Snapshot < Async =
       val snapshot = session.snapshot()
-      if holds(snapshot) || System.nanoTime() > deadline then snapshot
+      if holds(snapshot) || java.lang.System.nanoTime() > deadline then snapshot
       // Lazy: `loop()` must not be called until the sleep has finished, or the retries build an ever-deeper
       // computation instead of suspending.
       else Async.sleep(50.millis).andThen(loop())
@@ -518,10 +533,10 @@ object HostProbe:
 
   /** Waits for a condition on the session's metrics, with a bound: teardown has to finish, not hang. */
   private def awaitCondition(timeout: scala.concurrent.duration.Duration)(condition: () => Boolean)(using Frame): Boolean < Async =
-    val deadline = System.nanoTime() + timeout.toNanos
+    val deadline = java.lang.System.nanoTime() + timeout.toNanos
     def loop(): Boolean < Async =
       if condition() then true
-      else if System.nanoTime() > deadline then false
+      else if java.lang.System.nanoTime() > deadline then false
       else Async.sleep(20.millis).andThen(loop())
     loop()
 

@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
 import kyo.*
+// The contract has a `Frame` as well (a client's screen); this file means kyo's source position, so it says so.
+import kyo.Frame
 import org.slf4j.LoggerFactory
 import scala.jdk.CollectionConverters.*
 
@@ -25,8 +27,9 @@ import scala.jdk.CollectionConverters.*
   * is data, not a lifecycle flag — the session's lifetime is the scope's — and it is an atomic because the writer is a fiber parked in a
   * blocking read, which no effect system can serialise for us.
   */
-private[host] final class HostSession(
+private[corvi] final class HostSession private[host] (
     val id: SessionId,
+    val index: Int,
     private val theme: TerminalTheme,
     private val process: PtyProcess,
     private val connector: PtyProcessTtyConnector,
@@ -39,16 +42,19 @@ private[host] final class HostSession(
     override def sendBytes(response: Array[Byte], userInput: Boolean): Unit = connector.write(response)
     override def sendString(string: String, userInput: Boolean): Unit = connector.write(string)
 
+  /** The shell's exit code, once it has one: what `session.exited` reports. */
+  def exitCode: Option[Int] = if process.isAlive then None else Some(process.exitValue())
+
   /** Why the reader stopped, when it was not a clean end: the protocol reports it as the session's exit, and the host's scope is unharmed.
     */
   private val failure: AtomicReference[Option[Throwable]] = new AtomicReference(None)
 
   private val logger = LoggerFactory.getLogger(classOf[HostSession])
 
-  def info: SessionInfo = ScreenReader.info(id, buffer, theme, process.isAlive)
+  def info: SessionInfo = ScreenReader.info(id, index, buffer, process.isAlive)
 
-  /** The visible grid, the cursor, the modes and the history's depth, as one value, read at one instant. */
-  def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display)
+  /** The visible grid, the cursor, the modes, the history's depth and the theme, as one value, read at one instant. */
+  def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display, theme)
 
   /** Rows from the scrollback, newest first, `from` counting back from the most recent (1-based). */
   def history(from: Int, count: Int): Vector[Row] = ScreenReader.history(buffer, from, count)
@@ -117,7 +123,7 @@ private[host] final class HostSession(
       // A dead shell must not leave a cursor blinking on a screen nobody will update again.
       terminal.disconnected()
 
-private[host] object HostSession:
+private[corvi] object HostSession:
   /** The history Corvi caps at, the size a session starts at, and the colours a cell with none of its own is drawn in.
     */
   private val historyLines: Int = 5000
@@ -132,36 +138,41 @@ private[host] object HostSession:
     * A shell that cannot start is an abort rather than a panic, so the protocol can report "could not start" the same way it reports an
     * exit.
     */
-  def open(id: SessionId, cwd: Path)(using Frame): HostSession < (Async & Scope & Abort[Throwable]) =
+  def open(id: SessionId, index: Int, cwd: Path, command: Seq[String])(using
+      Frame
+  ): HostSession < (Async & Scope & Abort[Throwable]) =
     for
-      process <- Scope.acquireRelease(Abort.catching(spawn(cwd)))(proc => Sync.defer(proc.destroy()))
-      session <- Sync.defer(create(id, process))
+      process <- Scope.acquireRelease(Abort.catching(spawn(cwd, command)))(proc => Sync.defer(proc.destroy()))
+      session <- Sync.defer(create(id, index, process))
       _ <- Fiber.init(Sync.defer(session.drive()))
       _ <- Scope.ensure(Sync.defer(session.close()))
     yield session
 
-  private def create(id: SessionId, process: PtyProcess): HostSession =
+  private def create(id: SessionId, index: Int, process: PtyProcess): HostSession =
     val connector = new PtyProcessTtyConnector(process, StandardCharsets.UTF_8)
     val styleState = new StyleState()
     styleState.setDefaultStyle(new TextStyle(rgb(theme.foreground), rgb(theme.background)))
     val buffer = new TerminalTextBuffer(initialColumns, initialRows, styleState, historyLines, null)
     val display = new RecordingDisplay()
     val terminal = new JediTerminal(display, buffer, styleState)
-    val session = new HostSession(id, theme, process, connector, buffer, terminal, display)
+    val session = new HostSession(id, index, theme, process, connector, buffer, terminal, display)
     terminal.setTerminalOutput(session.output)
     session
 
   private def rgb(colour: Rgb): TerminalColor = TerminalColor.rgb(colour.red, colour.green, colour.blue)
 
-  /** A login shell in the session's directory, on a real PTY: the app's environment so it finds the PATH the user has, plus the one
-    * variable that makes the pty a colour terminal.
+  /** The login shell the environment names, which is what a normal session runs. */
+  def loginShell: Seq[String] =
+    Seq(Option(java.lang.System.getenv("SHELL")).filter(_.nonEmpty).getOrElse("/bin/sh"), "-l")
+
+  /** A command in the session's directory, on a real PTY: the app's environment so it finds the PATH the user has, plus the one variable
+    * that makes the pty a colour terminal. The command is a parameter so a caller can prove what a shell that cannot start does.
     */
-  private def spawn(cwd: Path): PtyProcess =
-    val shell = Option(System.getenv("SHELL")).filter(_.nonEmpty).getOrElse("/bin/sh")
+  private def spawn(cwd: Path, command: Seq[String]): PtyProcess =
     val environment: java.util.Map[String, String] =
-      (System.getenv().asScala.toMap + ("TERM" -> "xterm-256color")).asJava
+      (java.lang.System.getenv().asScala.toMap + ("TERM" -> "xterm-256color")).asJava
     new PtyProcessBuilder()
-      .setCommand(Array(shell, "-l"))
+      .setCommand(command.toArray)
       .setEnvironment(environment)
       .setDirectory(cwd.toString)
       .setInitialColumns(initialColumns)

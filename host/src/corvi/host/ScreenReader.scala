@@ -20,7 +20,7 @@ private[host] object ScreenReader:
     */
   private val palette = ColorPaletteImpl.XTERM_PALETTE
 
-  def snapshot(id: SessionId, buffer: TerminalTextBuffer, display: RecordingDisplay): Snapshot =
+  def snapshot(id: SessionId, buffer: TerminalTextBuffer, display: RecordingDisplay, theme: TerminalTheme): Snapshot =
     buffer.lock()
     try
       val state: State = display.state
@@ -45,23 +45,36 @@ private[host] object ScreenReader:
           bracketedPaste = state.bracketedPaste,
           title = state.title
         ),
-        historyRows = buffer.getHistoryLinesCount
+        historyRows = buffer.getHistoryLinesCount,
+        theme = theme
       )
     finally buffer.unlock()
 
   /** The session's metrics, read under the buffer's lock like everything else that reads the buffer. */
-  def info(id: SessionId, buffer: TerminalTextBuffer, theme: TerminalTheme, running: Boolean): SessionInfo =
+  def info(id: SessionId, index: Int, buffer: TerminalTextBuffer, running: Boolean): SessionInfo =
     buffer.lock()
-    try SessionInfo(id = id, size = TermSize(buffer.getWidth, buffer.getHeight), historyRows = buffer.getHistoryLinesCount, theme, running)
+    try
+      SessionInfo(
+        id = id,
+        index = index,
+        size = TermSize(buffer.getWidth, buffer.getHeight),
+        historyRows = buffer.getHistoryLinesCount,
+        running
+      )
     finally buffer.unlock()
 
   /** What changed between `previous` and `current`: the rows whose cells differ, by index (a row that did not exist before counts as
     * changed), plus whatever changed about the frame that is not a row.
+    *
+    * A size change carries *every* row. The rows have been re-indexed, so a row that happens to have the same contents at the same index is
+    * still drawn by the client at a place that means something else now, and a same-width height change would otherwise blank the rows that
+    * survived. The delta stays absolute and idempotent, which is what lets a client apply what arrives without asking again.
     */
   def damage(previous: Snapshot, current: Snapshot): Damage =
+    val resized = previous.size != current.size
     Damage(
       rows = current.rows.zipWithIndex.collect {
-        case (row, index) if previous.rows.lift(index).forall(_ != row) => RowDamage(index, row)
+        case (row, index) if resized || previous.rows.lift(index).forall(_ != row) => RowDamage(index, row)
       },
       size = Option.when(previous.size != current.size)(current.size),
       cursor = Option.when(previous.cursor != current.cursor)(current.cursor),
