@@ -1,6 +1,6 @@
 # Corvi terminal architecture: host-owned screen, thin renderer, Kyo host
 
-Status: agreed design for the Kyo rewrite. Supersedes `docs/direct-style.md` where they disagree.
+Status: the design as built. The old Ox implementation has been removed.
 
 ## Processes
 
@@ -142,9 +142,14 @@ policy.
 - The token file is created atomically at 0600 and the comparison is constant-time (`MessageDigest.isEqual`), but the token is a file: anything
   that can read it can talk to the daemon. There is no rotation and no per-connection expiry.
 - `host.stop` ends the process rather than the connections one by one, so a client that is mid-request during a stop sees its socket close
-  (`Closed`) rather than an error reply. There is no idle exit: the daemon lives until stopped or killed.
-- A UI whose host dies is not reconnected automatically: `HostConnection.ensure` starts a new daemon when it runs, and `DaemonApp` does not
-  re-run it on `Closed` (the probe covers recovery, the window does not yet).
+  (`Closed`) rather than an error reply. There is no idle exit: the daemon lives until stopped or killed. The liveness
+  check that decides whether to spawn one opens its probe channel as a **UNIX** family channel: a default
+  `SocketChannel.open()` is an INET channel, and connecting it to a `UnixDomainSocketAddress` throws
+  `UnsupportedAddressTypeException`, which reads exactly like "nobody is listening". The symptom is a second daemon per
+  UI start and a UI that then waits for a socket that already exists; `HostDaemonProbe` checks both the live and the dead
+  answer.
+- A UI whose host dies is not reconnected automatically: `HostConnection.ensure` starts a new daemon when it runs, and `ShellApp` does
+  not re-run it on `Closed` (the daemon probe covers a replacement answering, the window does not).
 - `host.log` is truncated on every spawn, so it holds one launch's output, not a history.
 - Spawn detachment is `java -cp` with redirected stdio and no handle kept; it does **not** call `setsid`, so a launcher that kills its whole
   process group takes the daemon with it. A packaged app needs its own launcher.
@@ -166,7 +171,7 @@ policy.
 ## The renderer
 
 `renderer` turns a `Frame` into pixels and does nothing else: no terminal engine, no PTY, no host. Its module dependencies
-(`contract`, `protocol`, ScalaFX) are the proof, and the window, the snapshot harness and the probe live in `rendererApp` precisely because
+(`contract`, `protocol`, ScalaFX) are the proof, and the window, the snapshot harness and the probe live in `app` precisely because
 they start a real host.
 
 - **Pure core.** `Layout` (cell width/height and the pixel/cell mapping), `Selection` (a viewport range, ordered, with `contains`),
@@ -208,7 +213,7 @@ through a fake factory and know nothing about where pixels or bytes come from.
   `close`, and the `gridFor` size query. **Every callback runs on the UI thread**: `RendererViewFactory` hops with `Platform.runLater`, and
   the views promise it on their side (`SessionEvents`). The shell therefore guards no state and never enters an effect.
 - **Sink ownership.** A view hears its session's damage only if it is plugged into the sink the client's push routes were wired with. That is
-  not a convention but a value: `rendererApp.Client(service, sink)` is made in the one place the client is made (`Harness.start`,
+  not a convention but a value: `app.Client(service, sink)` is made in the one place the client is made (`Harness.start`,
   `HostConnection.ensure`), `RendererViewFactory` takes the whole `Client`, and `dispose` unplugs the view so a closed tab stops being
   iterated. Choosing a second sink is exactly what once left every tab parked on its seeded frame.
 - **Create and close are asynchronous.** They are offered to the client's own runtime (`Client.Calls`, one fiber draining a blocking queue,
@@ -229,7 +234,8 @@ through a fake factory and know nothing about where pixels or bytes come from.
 - **Not built: reconnect.** `ShellApp` ensures the host, lists once and attaches; if the daemon goes away the window keeps the last frames it
   received. The architecture already makes a host's death the shells' death, so this phase records the gap instead of hiding it: restarting
   the window reattaches to whatever host answers then. A UI restart against a *live* host works — that is the case that was in scope.
-- The duplicate Ox sources in `app/` are still in the tree and are still what `./mill app.run` runs; removing them is the next chunk.
+- `./mill app.run` starts `ShellApp`, the daemon-backed window; the probes and the snapshot harness live in the same module because
+  they start a real host.
 
 ## The daemon
 
@@ -262,8 +268,9 @@ connects to it; it does not own it.
   deadlocks, and the process exit closes their sockets anyway. Closing the listener is what ends the accept loop's blocking `accept` — it works
   because `ServerSocketChannel` is an `InterruptibleChannel`; a non-interruptible accept would leave the scope waiting for a connection that can
   never come.
-- **Starting.** `HostConnection.ensure` (in `rendererApp`, not in `renderer`) connects, and if nothing answers spawns the daemon with this
-  JVM's own `java`, classpath and Kyo flags, its output appended to `host.log` beside the socket, its stdin `/dev/null`, and drops the handle:
+- **Starting.** `HostConnection.ensure` (in `app`, not in `renderer`) connects, and if nothing answers spawns the daemon with this
+  JVM's own `java`, classpath and Kyo flags, its output written to `host.log` beside the socket (truncated on every spawn), its stdin
+  `/dev/null`, and drops the handle:
   nothing waits for it, nothing destroys it. Then it waits for the socket and says hello. The packaged app will need a launcher of its own;
   `java -cp` is what a Mill-run UI can do.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. A second client can attach to the
@@ -278,13 +285,12 @@ protocol   kyo-jsonrpc route names, schemas, typed errors, ClientRoutes, Termina
 host       PTY + jeditermfx-core emulator, HostSession, HostSessions (registry + push loops), HostRoutes, in-memory wiring, probes;
            depends on contract and protocol
 renderer   thin JavaFX canvas: Frame → cells, cursor, selection, scrollback; depends on contract, protocol, ScalaFX
-rendererApp window, snapshot harness and probe: they start a real host, which the renderer must not
+app        the composition root: `ShellApp` (the window), host connection, client, view factory, and the probes, which
+           start a real host — the dependency the renderer must not have
 ui         shell/tabs/sidebar/state/chords; depends on contract only, over the TerminalView seam
-app        the old Ox app, still built and still what `./mill app.run` starts; removed next phase.
-           The Kyo window is `rendererApp`'s `ShellApp`
 ```
 
-The UI is testable with a fake `TerminalService`; the host and renderer are testable headlessly.
+The UI is testable with a fake `TerminalViewFactory`; the host and renderer are testable headlessly.
 
 ## Kyo
 
@@ -323,7 +329,8 @@ The UI is testable with a fake `TerminalService`; the host and renderer are test
 2. Protocol + renderer: in-process `kyo-jsonrpc`, JavaFX canvas applying snapshots/damage.
 3. Process boundary: UDS transport, host spawn/reconnect, UI client.
 4. Live-all + restart: all session frames cached, snapshot on attach, UI restart reattaches.
-5. Harden, Kyo skill, docs, remove the old Ox code.
+5. Harden, Kyo skill, docs, remove the old Ox code. Done: the Ox app and docs are gone, `app/` is the Kyo
+   composition root, and `.agents/skills/kyo-scala/` is the coding guide.
 
 ## Decisions recorded by the spike
 

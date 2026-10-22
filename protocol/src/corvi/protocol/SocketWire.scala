@@ -102,7 +102,9 @@ private[corvi] object SocketWire:
     else
       var probe: SocketChannel = null
       try
-        probe = SocketChannel.open()
+        // The channel's family has to be UNIX: a default `SocketChannel.open()` is an INET channel, and connecting that to a
+        // `UnixDomainSocketAddress` throws `UnsupportedAddressTypeException`, which reads exactly like "nobody is listening".
+        probe = SocketChannel.open(StandardProtocolFamily.UNIX)
         probe.configureBlocking(false)
         val _ = probe.connect(UnixDomainSocketAddress.of(socket))
         val deadline = java.lang.System.nanoTime() + timeout.toNanos

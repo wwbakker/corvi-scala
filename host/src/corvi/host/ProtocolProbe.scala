@@ -3,6 +3,7 @@ package corvi.host
 import corvi.contract.Frame as ScreenFrame
 import corvi.contract.*
 import corvi.protocol.*
+import java.util.concurrent.atomic.AtomicInteger
 import kyo.*
 import kyo.Frame
 import scala.concurrent.duration.*
@@ -57,14 +58,15 @@ object ProtocolProbe:
 
   /** PASS/FAIL lines and the count the probe exits with. */
   private final class Reporter:
-    private var failed = 0
+    private val failed = AtomicInteger(0)
 
     def report(name: String, ok: Boolean, detail: String): Unit =
-      if !ok then failed += 1
+      if !ok then
+        val _ = failed.incrementAndGet()
       println(s"${if ok then "PASS" else "FAIL"}  $name")
       detail.linesIterator.filter(_.trim.nonEmpty).toSeq.takeRight(4).foreach(line => println(s"      | $line"))
 
-    def failures: Int = failed
+    def failures: Int = failed.get()
 
   /** A client's side of the pipeline: a frame per session, moved only by the host's pushes, plus what it was told about the end. */
   private final class FrameCache private (

@@ -25,43 +25,6 @@ val noTransitiveOpenJfx: String = "exclude=org.openjfx:*"
   */
 val noTransitiveScala3Library: String = "exclude=org.scala-lang:scala3-library_3"
 
-object app extends ScalaModule:
-  def scalaVersion = "3.10.0"
-  def mainClass = Some("corvi.Main")
-
-  def scalacOptions = Seq(
-    "-Wunused:all",
-    "-Wvalue-discard",
-    "-Wnonunit-statement"
-  )
-
-  def mvnDeps = Task {
-    Seq(
-      mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library",
-      mvn"com.softwaremill.ox::core:1.0.9;$noTransitiveScala3Library",
-      mvn"ch.qos.logback:logback-classic:1.6.5",
-      mvn"com.techsenger.jeditermfx:jeditermfx-core:1.1.0;$noTransitiveOpenJfx",
-      mvn"com.techsenger.jeditermfx:jeditermfx-ui:1.1.0;$noTransitiveOpenJfx",
-      mvn"org.jetbrains.pty4j:pty4j:0.14.0"
-    ) ++ Seq("base", "graphics", "controls", "media")
-      // The classifier jar replaces the stub for the module itself; the exclusion drops the bare
-      // stubs each OpenJFX POM repeats for its siblings.
-      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
-  }
-
-  /** ScalaFX's own signatures mention JavaFX modules this app never calls — `javafx.scene.web` and `javafx.embed.swing` — and the compiler
-    * needs their jars to read those signatures. They stay compile-only; javafx-web alone is 36 MB of natives.
-    *
-    * `javafx.media` cannot be compile-only: applying an implicit conversion brings `scalafx.Includes` into the running program, and
-    * `Includes` resolves `javafx.scene.media.MediaException` (the stylesheet assignment in `AppWindow.scala` is the first conversion the
-    * app applies). An unused import alone loads nothing. Without the module the app dies at startup with
-    * `NoClassDefFoundError: javafx/scene/media/MediaException$Type`.
-    */
-  def compileMvnDeps = Task {
-    Seq("web", "swing")
-      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
-  }
-
 /** The DTOs the host and the future UI share. Pure data: no JavaFX, no Kyo, no terminal engine. */
 object contract extends ScalaModule:
   def scalaVersion = "3.10.0"
@@ -84,7 +47,7 @@ object host extends ScalaModule:
   def mainClass = Some("corvi.host.HostProbe")
 
   // Kyo requires these: it returns values that must not be silently discarded, and it relies on
-  // strict equality. `kyo-jsonrpc` and `kyo-system` arrive with the protocol phase, when they are used.
+  // strict equality. `kyo-jsonrpc` arrives through `protocol`; this module answers the routes.
   def scalacOptions = Seq(
     "-Wunused:all",
     "-Wvalue-discard",
@@ -186,11 +149,16 @@ object renderer extends ScalaModule:
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
   )
 
-/** The window, the snapshot harness and the probe: they start a real host, which is the dependency the `renderer` module must not have. */
-object rendererApp extends ScalaModule:
+/** The Corvi window: the composition root, which ensures the host, lists and attaches, and builds the shell over the real client. The
+  * probes live here too because they start a real host — the dependency the `renderer` module must not have.
+  *
+  * logback is here rather than in `host` because this module's run classpath is what `HostConnection` reuses to spawn the daemon, so the
+  * provider and its `logback.xml` reach both processes.
+  */
+object app extends ScalaModule:
   def scalaVersion = "3.10.0"
   def moduleDeps = Seq(renderer, host, ui)
-  def mainClass = Some("corvi.renderer.RendererApp")
+  def mainClass = Some("corvi.app.ShellApp")
 
   def scalacOptions = Seq(
     "-Wunused:all",
@@ -203,6 +171,12 @@ object rendererApp extends ScalaModule:
     "-language:strictEquality",
     "-Xmax-inlines:128"
   )
+
+  def mvnDeps = Task {
+    Seq(
+      mvn"ch.qos.logback:logback-classic:1.6.5"
+    )
+  }
 
   def forkArgs = Seq(
     "-Dkyo.scheduler.virtualizeWorkers=true",

@@ -9,7 +9,7 @@ package corvi.ui
   */
 private[corvi] object Chords:
   /** What a press asks the shell to do. A `Passed` key belongs to the terminal. */
-  enum Outcome:
+  enum Outcome derives CanEqual:
     case PrefixArmed
     case Open
     case CloseSelected
@@ -58,7 +58,7 @@ private[corvi] object Chords:
       case _                                      => Outcome.Passed
 
   /** A keystroke, as the chord machine sees it: the key, with its modifiers already accounted for. */
-  enum Key:
+  enum Key derives CanEqual:
     case Open, Close, Prefix, Create, Other
     case Digit(index: Int)
 

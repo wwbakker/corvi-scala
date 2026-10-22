@@ -3,6 +3,7 @@ package corvi.host
 import com.techsenger.jeditermfx.core.emulator.mouse.MouseMode as EngineMouseMode
 import corvi.contract.*
 import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicInteger
 import kyo.*
 // The contract has a `Frame` as well (a client's screen); this file means kyo's source position, so it says so.
 import kyo.Frame
@@ -47,14 +48,15 @@ object HostProbe:
 
   /** PASS/FAIL lines, and the count the probe exits with. The counter is the harness's own accounting, not app state. */
   private final class Reporter:
-    private var failed = 0
+    private val failed = AtomicInteger(0)
 
     def report(name: String, ok: Boolean, detail: String): Unit =
-      if !ok then failed += 1
+      if !ok then
+        val _ = failed.incrementAndGet()
       println(s"${if ok then "PASS" else "FAIL"}  $name")
       detail.linesIterator.filter(_.trim.nonEmpty).toSeq.takeRight(4).foreach(line => println(s"      | $line"))
 
-    def failures: Int = failed
+    def failures: Int = failed.get()
 
   /** What the screen says: text, colours and attributes, wide characters, the cursor and its shape. */
   private def screenChecks(session: HostSession, reporter: Reporter)(using

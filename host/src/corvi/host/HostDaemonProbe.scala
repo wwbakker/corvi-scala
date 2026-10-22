@@ -32,6 +32,13 @@ object HostDaemonProbe:
       val token = paths.token()
       host = Some(spawn(paths))
       reporter.report("the daemon binds its socket", awaitSocket(socket), s"socket $socket")
+      // The check HostConnection uses to decide whether to spawn a daemon at all: a live listener has to read as live, or every UI start
+      // would spawn a second host and wait for a socket that is already there. It opens a UNIX-family channel on purpose.
+      reporter.report(
+        "a live daemon answers the client's liveness check",
+        SocketWire.answersUnsafe(socket, scala.concurrent.duration.Duration(500, "ms")),
+        s"socket $socket"
+      )
 
       // A connection that has not said hello is refused, and a wrong token is refused in a way a client can match.
       val unauthorized = runSession(paths) { client =>
@@ -250,6 +257,11 @@ object HostDaemonProbe:
         "and its socket and owner marker",
         poll(scala.concurrent.duration.Duration(10, "s"))(!Files.exists(socket) && !Files.exists(paths.ownerFile)),
         s"socket exists ${Files.exists(socket)}, owner exists ${Files.exists(paths.ownerFile)}"
+      )
+      reporter.report(
+        "and stops answering the liveness check",
+        !SocketWire.answersUnsafe(socket, scala.concurrent.duration.Duration(500, "ms")),
+        s"socket $socket"
       )
     finally
       host.foreach(process => if process.isAlive then process.destroy())
