@@ -95,7 +95,6 @@ private[app] final class AppWindow(stage: Stage, metrics: TerminalMetrics, cwd: 
     connected.set(Some(client))
     val factory = RendererViewFactory(client, metrics, cwd)
     val shell = ShellView(factory)
-    if sessions.isEmpty then shell.newSession() else sessions.foreach(shell.open)
     mounted.set(Some(shell))
     val scene = new Scene(shell, 1180, 740)
     Stylesheet.attachTo(scene)
@@ -107,6 +106,9 @@ private[app] final class AppWindow(stage: Stage, metrics: TerminalMetrics, cwd: 
     })
     stage.setScene(scene)
     stage.show()
+    // After the stage is up, so the terminal area has the size the layout gives it: a session created before the first layout pass has no
+    // room to measure and would be created at the placeholder grid, then regrid (and reprint its prompt) once the view attaches.
+    if sessions.isEmpty then shell.newSession() else sessions.foreach(shell.open)
 
   private def failed(message: String): Unit =
     report(message)

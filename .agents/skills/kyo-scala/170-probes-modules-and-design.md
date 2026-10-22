@@ -142,6 +142,25 @@ The host interprets the terminal; the UI only paints.
   delta after a resize is dropped rather than thrown.
 - A resize is decided by the side that owns the window (debounced there: 500 ms, 100 ms on the alternate screen) and
   applied by the host.
+
+### Fitting the grid to the window
+
+The view computes its grid from the room it actually has — its own width minus the scrollbar's *managed* width, which is
+0 while the scrollbar is hidden — and asks for it once per distinct size, remembering the request until a frame of that
+size comes back. Three consequences are worth keeping:
+
+- A new tab is created at the full width, because a fresh terminal has no history and its scrollbar is hidden. Reserve a
+  nominal scrollbar in the factory and every new tab regrids once it attaches, which costs a SIGWINCH and a prompt
+  reprint per tab.
+- The scrollbar is `managed` exactly while it is visible, so its appearance changes the room without changing the window.
+  That transition arms the same debounce a window resize does, because no size listener will ever see it.
+- A confirmed frame that does not match the room re-arms the debounce, once per size. That is the resize-to-B-and-back
+  case: the answer for B lands after the user has returned to A, the A tick sent nothing because the frame already read
+  A, so nothing else would ask again. A host that clamps a size (1x1 becomes its minimum) leaves the request pending on
+  that grid, so the retry it triggers is suppressed rather than spinning.
+
+The view's minimum size is 0: it fills its container, and a canvas sized to the frame must never let the frame set the
+window's minimum — that is the ratchet that grew the window a cell per tick and reprinted the prompt with it.
 - Theme travels in `SessionInfo`; the title travels in `Modes`, because it changes with the terminal's state.
 
 Why: the VT engine has no JavaFX dependency, so it runs in a daemon with no toolkit; the UI process is a renderer that

@@ -1,6 +1,6 @@
 package corvi.app
 
-import corvi.contract.{Damage, Ended, SessionId}
+import corvi.contract.{Damage, Ended, Frame, SessionId, TermSize}
 import corvi.protocol.{ClientRoutes, FrameSink, HostPaths, SocketWire, TerminalClient, TerminalError}
 import corvi.renderer.{TerminalMetrics, TerminalView}
 import corvi.ui.ShellView
@@ -86,6 +86,20 @@ final class UiTest:
 
   @Test
   @Order(3)
+  def `the first tab is created at the grid the window gives it`(): Unit =
+    val shell = shellOf
+    val first =
+      onFx(shell.current.windows.headOption.map(window => shell.current.session(window.id))).flatten.getOrElse(fail("no first window"))
+    val created = onFx(viewOf(shell, first).flatMap(_.frame).map(_.size))
+    assertTrue(awaitStable(shell, first, 1200), "the first terminal's screen settles")
+    assertEquals(
+      created,
+      onFx(viewOf(shell, first).flatMap(_.frame).map(_.size)),
+      "the first tab is created at the room the window has, so it does not regrid once it is laid out"
+    )
+
+  @Test
+  @Order(4)
   def `the new tab opens its own terminal and takes the keyboard`(): Unit =
     val shell = shellOf
     click(tab(shell, tabs(shell).size - 1))
@@ -99,7 +113,7 @@ final class UiTest:
     awaitSelectedPrompt(shell)
 
   @Test
-  @Order(4)
+  @Order(5)
   def `every tab selects its own terminal, in both directions`(): Unit =
     val shell = shellOf
     // The regression: clicking back to the first tab has to move the strip's current tab, the visible terminal and the keyboard.
@@ -115,7 +129,7 @@ final class UiTest:
     awaitSelectedPrompt(shell)
 
   @Test
-  @Order(5)
+  @Order(6)
   def `the context menu closes a tab and its terminal`(): Unit =
     val shell = shellOf
     val closing = sessionOf(shell, 2)
@@ -127,7 +141,7 @@ final class UiTest:
     assertEquals(None, onFx(viewOf(shell, closing)), "the closed session has no view")
 
   @Test
-  @Order(6)
+  @Order(7)
   def `output in a background tab bells it, and never the selected one`(): Unit =
     val shell = shellOf
     click(tab(shell, tabs(shell).size - 1))
@@ -138,7 +152,7 @@ final class UiTest:
     assertFalse(bellOn(shell, 2), "the selected tab stays quiet")
 
   @Test
-  @Order(7)
+  @Order(8)
   def `a shell that exits marks its tab ended, with its code and no bell`(): Unit =
     val shell = shellOf
     val background = sessionOf(shell, 1)
@@ -148,7 +162,7 @@ final class UiTest:
     assertFalse(bellOn(shell, 1), "an ended tab does not bell")
 
   @Test
-  @Order(8)
+  @Order(9)
   def `control keys interrupt a blocked command and end the shell`(): Unit =
     val shell = shellOf
     val scene = onFx(stageOf.getScene)
@@ -171,7 +185,101 @@ final class UiTest:
     assertTrue(await(waitTimeout)(onFx(viewOf(shell, controlSession).exists(_.ended.isDefined))), "^D at the prompt ended the session")
 
   @Test
-  @Order(9)
+  @Order(10)
+  def `a new tab keeps the grid it was created at and prints its prompt once`(): Unit =
+    val shell = shellOf
+    val before = tabs(shell).size
+    click(tab(shell, before - 1))
+    awaitTabs(shell, before + 1)
+    val fresh = sessionOf(shell, before - 1)
+    awaitSelectedPrompt(shell)
+    val created = onFx(viewOf(shell, fresh).flatMap(_.frame).map(_.size))
+    assertTrue(awaitStable(shell, fresh, 1500), "the new tab's screen settles")
+    assertEquals(
+      created,
+      onFx(viewOf(shell, fresh).flatMap(_.frame).map(_.size)),
+      "the tab keeps the grid it was created at: a needless regrid would make the host reprint the prompt"
+    )
+    // The prompt is a shell prompt, and zsh's starship prompt repaints itself once while it resolves the branch, so "printed once" starts
+    // counting after that first repaint: from here the screen has to stay still for the same window again.
+    val settled = onFx(viewOf(shell, fresh).flatMap(_.frame).map(frame => (frame.size, screenText(frame))))
+    assertTrue(awaitStable(shell, fresh, 1200), "and the screen is still after it")
+    assertEquals(
+      settled,
+      onFx(viewOf(shell, fresh).flatMap(_.frame).map(frame => (frame.size, screenText(frame)))),
+      "the prompt is printed once: no later repaint, and no resize behind it"
+    )
+
+  @Test
+  @Order(11)
+  def `history brings the scrollbar in and the grid follows it`(): Unit =
+    val shell = shellOf
+    val before = tabs(shell).size
+    click(tab(shell, before - 1))
+    awaitTabs(shell, before + 1)
+    val scrolled = sessionOf(shell, before - 1)
+    awaitSelectedPrompt(shell)
+    typeInto(shell, scrolled, "seq 1 200\r")
+    assertTrue(
+      await(waitTimeout)(onFx(viewOf(shell, scrolled).flatMap(_.frame).exists(_.historyRows > 0))),
+      "the session has scrollback"
+    )
+    assertTrue(awaitSettledGrid(shell, scrolled, 1000), "the screen settles on the grid the visible scrollbar leaves")
+    assertTrue(
+      onFx(viewOf(shell, scrolled).flatMap(view => Option(view.lookup(".scroll-bar"))).exists(_.isVisible)),
+      "the scrollbar is showing"
+    )
+    assertEquals(
+      onFx(viewOf(shell, scrolled).map(_.contentGrid)),
+      onFx(viewOf(shell, scrolled).flatMap(_.frame).map(_.size)),
+      "the grid leaves room for the visible scrollbar"
+    )
+    // History only grows (the host keeps its scrollback), so growing the window keeps the scrollbar in; the grid follows the new size.
+    onFx {
+      stageOf.setWidth(1200)
+      stageOf.setHeight(760)
+    }
+    assertTrue(awaitSettledGrid(shell, scrolled, 1000), "the screen settles after growing the window")
+    assertEquals(
+      onFx(viewOf(shell, scrolled).map(_.contentGrid)),
+      onFx(viewOf(shell, scrolled).flatMap(_.frame).map(_.size)),
+      "and the grid still matches the room the window gives it"
+    )
+    assertEquals(
+      onFx(viewOf(shell, scrolled).flatMap(view => Option(view.lookup(".scroll-bar"))).exists(_.isVisible)),
+      true,
+      "the scrollbar stays in: history does not empty"
+    )
+
+  @Test
+  @Order(12)
+  def `resizing the window settles on the grid that fits it`(): Unit =
+    val shell = shellOf
+    val stage = stageOf
+    // A live session of its own: the views above include one whose shell has ended, and an ended session takes no resizes.
+    val beforeResize = tabs(shell).size
+    click(tab(shell, beforeResize - 1))
+    awaitTabs(shell, beforeResize + 1)
+    val resized = sessionOf(shell, beforeResize - 1)
+    awaitSelectedPrompt(shell)
+    val sizes = Seq((1000.0, 650.0), (1260.0, 780.0), (820.0, 520.0), (740.0, 450.0), (1100.0, 700.0), (760.0, 480.0))
+    sizes.foreach { (width, height) =>
+      onFx {
+        stage.setWidth(width)
+        stage.setHeight(height)
+      }
+      assertTrue(awaitSettledGrid(shell, resized, 1000), s"the frame settles on the room's grid after resizing to ${width}x$height")
+      val frameSize = onFx(viewOf(shell, resized).flatMap(_.frame).map(_.size))
+      val grid = onFx(viewOf(shell, resized).map(_.contentGrid))
+      assertEquals(grid, frameSize, s"the host's frame is the grid the view asked for after ${width}x$height")
+      assertTrue(
+        onFx(stage.getWidth) <= width + 1.0 && onFx(stage.getHeight) <= height + 1.0,
+        s"the window is not pushed open by its content: asked ${width}x$height, got ${onFx(stage.getWidth)}x${onFx(stage.getHeight)}"
+      )
+    }
+
+  @Test
+  @Order(13)
   def `the run still has exactly one window`(): Unit =
     assertEquals(1, showingWindows(), "nothing above opened a second window")
 
@@ -241,6 +349,46 @@ final class UiTest:
       onFx(Option(shell.getScene).flatMap(scene => Option(scene.getFocusOwner)).exists(owner => viewOf(shell, session).exists(_ eq owner)))
     )
     assertTrue(focused, s"the keyboard is in $session's terminal")
+
+  /** Waits until the terminal's screen — its size *and* every row's text — has not changed for `stillMillis`. A resize loop keeps changing
+    * the size, and a prompt reprinted by a needless SIGWINCH changes the text without touching the size, so both have to be still.
+    */
+  private def awaitStable(shell: ShellView, session: SessionId, stillMillis: Long): Boolean =
+    val deadline = java.lang.System.nanoTime() + 20L * 1000 * 1000 * 1000
+    var last: Option[(TermSize, String)] = None
+    var since = java.lang.System.nanoTime()
+    var stable = false
+    while !stable && java.lang.System.nanoTime() < deadline do
+      val observed = onFx(viewOf(shell, session).flatMap(_.frame).map(frame => (frame.size, screenText(frame))))
+      if observed != last then
+        last = observed
+        since = java.lang.System.nanoTime()
+      else if java.lang.System.nanoTime() - since > stillMillis * 1000 * 1000 then stable = true
+      Thread.sleep(50)
+    stable
+
+  /** Waits until the terminal's frame is the grid its room asks for *and* has held that, screen and all, for `stillMillis`.
+    *
+    * "Unchanged for a while" alone can expire before the answer lands: the request is debounced by 500 ms and the host's frame takes a
+    * round trip back, so a window that starts on the previous frame can close before the new one arrives.
+    */
+  private def awaitSettledGrid(shell: ShellView, session: SessionId, stillMillis: Long): Boolean =
+    val deadline = java.lang.System.nanoTime() + 20L * 1000 * 1000 * 1000
+    var last: Option[(TermSize, String)] = None
+    var since = java.lang.System.nanoTime()
+    var settled = false
+    while !settled && java.lang.System.nanoTime() < deadline do
+      val observed = onFx(viewOf(shell, session).flatMap(_.frame).map(frame => (frame.size, screenText(frame))))
+      val grid = onFx(viewOf(shell, session).map(_.contentGrid))
+      if !observed.exists(pair => grid.contains(pair._1)) || observed != last then
+        last = observed
+        since = java.lang.System.nanoTime()
+      else if java.lang.System.nanoTime() - since > stillMillis * 1000 * 1000 then settled = true
+      Thread.sleep(50)
+    settled
+
+  private def screenText(frame: Frame): String =
+    frame.rows.map(row => row.cells.map(_.text).mkString.replaceAll("\\s+$", "")).mkString("\n")
 
   private def showingWindows(): Int = onFx(Window.getWindows.toArray.toVector.collect { case shown: Window => shown }.count(_.isShowing))
 

@@ -24,14 +24,6 @@ import scala.util.Try
   * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
   * full-screen program repainting on every step would be the expensive part.
   */
-object TerminalView:
-
-  /** Room kept for the scrollbar whether it is showing or not: a column that appears when history arrives would otherwise re-grid the
-    * terminal, and the host would be asked to resize for no reason the user can see. A factory fitting a new session to the window takes
-    * the same room off, so the first grid and the view's own agree.
-    */
-  val scrollbarWidth: Double = 16
-
 final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics)
     extends BorderPane
     with FrameSink
@@ -57,6 +49,16 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     */
   private var pendingDamage: Vector[Damage] = Vector.empty
 
+  /** The grid the last resize asked for, until the host's frame confirms it: the answer is a round trip away and the view must not ask
+    * twice.
+    */
+  private var lastRequested: Option[TermSize] = None
+
+  /** The frame size a resize was last scheduled for because it did not match the room, so repeated damage for the same mismatch does not
+    * rearm the debounce and defer the request forever.
+    */
+  private var mismatchScheduled: Option[TermSize] = None
+
   /** How much damage a view that has not attached yet may hold. The host can push before the attach answer lands, so the deltas are kept
     * until the seed arrives — but a view whose attach never completes must not grow the window's memory with a session it will never show.
     * The newest deltas win, and dropping the oldest is lossy: a row whose only change fell outside the window keeps the seed's older value
@@ -73,6 +75,14 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     */
   private val resizeTimer = PauseTransition(Duration.millis(500))
 
+  /** The frame's grid does not get a say in the view's minimum size. A Canvas is not resizable, so the BorderPane would otherwise derive
+    * its min (and the window's) from the canvas, which grows with every frame the host applies — and a window that cannot shrink below its
+    * own canvas ratchets: shrink a step, get a smaller grid, a larger canvas minimum, and a window that grows back to fit it. The view
+    * fills whatever the parent gives it; the canvas is a drawing sized to the frame.
+    */
+  locally:
+    setMinSize(0, 0)
+
   locally:
     setFocusTraversable(true)
     setCenter(canvas)
@@ -80,6 +90,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     // The view itself is the terminal's colour, so the pixels between the grid and the window edge are not the toolkit's theme.
     setBackground(Background(BackgroundFill(Color.rgb(13, 17, 23), CornerRadii.EMPTY, Insets.EMPTY)))
     scrollbar.setVisible(false)
+    // A hidden scrollbar must not hold a column: managed follows visible, so the content area the grid is computed from is the same area the
+    // layout gives the canvas.
+    scrollbar.setManaged(false)
+    val _ = scrollbar.managedProperty().bind(scrollbar.visibleProperty())
     // The scrollbar runs the other way round from the model: its bottom is the live grid, because that is where a scrollbar's "end" is.
     val _ = scrollbar.valueProperty().addListener((_, _, value) => scrollTo(math.round(scrollbar.getMax() - value.doubleValue()).toInt))
     val _ = focusedProperty().addListener((_, _, focused) => canvas.setBaseFocus(focused))
@@ -271,6 +285,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
 
   override def attached(snapshot: Snapshot): Unit =
     val next = ScreenModel.from(snapshot)
+    lastRequested = None
     model = Some(next)
     applyBackground(next.frame.theme)
     updateScrollbar(next)
@@ -278,7 +293,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     pendingDamage = Vector.empty
     pending.foreach(applyToModel)
     redraw()
-    scheduleResize()
+    noteFrame()
 
   override def history(rows: Vector[Row]): Unit =
     model.foreach { current =>
@@ -288,6 +303,26 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       redraw()
     }
 
+  /** The frame the host applied, after the model has it.
+    *
+    * The request that produced it is no longer in flight. A frame that does not match the room the view has means a request was overtaken —
+    * resize to B, back to A before B's answer landed: the A tick sends nothing because the frame already reads A, then B's frame arrives
+    * and nothing would ask again — so a mismatch arms the debounce once more. `mismatchScheduled` keeps repeated damage for the same
+    * mismatch from restarting the timer, which would defer the request through continuous output.
+    *
+    * A host that clamps a size (1x1 becomes its minimum) leaves `lastRequested` on that grid, so the retry it triggers is suppressed as
+    * already-asked rather than spinning. Any real grid a user asks for is sent.
+    */
+  private def noteFrame(): Unit =
+    model.foreach { current =>
+      val size = current.frame.size
+      if lastRequested.contains(size) then lastRequested = None
+      if size == contentGrid then mismatchScheduled = None
+      else if !mismatchScheduled.contains(size) then
+        mismatchScheduled = Some(size)
+        scheduleResize()
+    }
+
   /** The view's own background is the session's, so the pixels between the canvas and the window edge are the terminal's and not Modena's.
     */
   private def applyBackground(theme: TerminalTheme): Unit =
@@ -295,14 +330,19 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
 
   private def acceptEnd(ended: Ended): Unit =
     end = Some(ended)
+    // A session that has ended takes no resizes — the host refuses them — so the view stops asking instead of logging a refusal per tick.
+    resizeTimer.stop()
     endedListeners.foreach(listener => listener(ended))
     redraw()
 
   private def applyDamage(damage: Damage): Unit =
     if !damage.isEmpty then activityListeners.foreach(listener => listener())
     model match
-      case Some(_) => applyToModel(damage); redraw()
-      case None    => pendingDamage = (pendingDamage :+ damage).takeRight(maxPendingDamage)
+      case Some(_) =>
+        applyToModel(damage)
+        redraw()
+        noteFrame()
+      case None => pendingDamage = (pendingDamage :+ damage).takeRight(maxPendingDamage)
 
   private def applyToModel(damage: Damage): Unit =
     model.foreach { current =>
@@ -326,21 +366,40 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       canvas.show(current, selection)
     }
 
+  /** The scrollbar is managed exactly while it is visible, so showing or hiding it changes the content area the grid is computed from. That
+    * is a layout change the window's size listeners never see, so the transition arms the same debounce a window resize does; the request
+    * is deduped by `lastRequested`. History only grows (the host keeps its scrollback), so the transition is one-way in practice and cannot
+    * cycle on a boundary.
+    */
   private def updateScrollbar(model: ScreenModel): Unit =
+    val wasVisible = scrollbar.isVisible
     scrollbar.setVisible(model.maxScroll > 0)
+    if scrollbar.isVisible != wasVisible then scheduleResize()
     if model.maxScroll > 0 then
       scrollbar.setMin(0)
       scrollbar.setMax(model.maxScroll)
       scrollbar.setVisibleAmount(math.max(1, model.rows * model.maxScroll / math.max(1, model.maxScroll + model.rows)))
       scrollbar.setValue(model.maxScroll - model.scrollOffset)
 
+  /** The grid the view has room for, in cells, as the resize request computes it; for the window's own tests. */
+  private[corvi] def contentGrid: TermSize =
+    val (cols, rows) = gridForSize()
+    TermSize(cols = cols, rows = rows)
+
   /** The grid the view has room for, in cells. */
   private def gridForSize(): (Int, Int) =
     val layout = metrics.layout
-    (layout.colsFor(math.max(0, getWidth) - TerminalView.scrollbarWidth), layout.rowsFor(math.max(0, getHeight)))
+    (layout.colsFor(math.max(0, getWidth) - scrollbarExtent), layout.rowsFor(math.max(0, getHeight)))
+
+  /** The room the scrollbar takes from the content area: the layout's own answer, taken from the scrollbar's managed width, never a
+    * constant. The scrollbar is managed exactly while it is visible, so a hidden one takes nothing and the grid stops changing the moment
+    * the layout does. (A hard-coded 16 next to a 15-pixel scrollbar is a column of mismatch at every width.)
+    */
+  private def scrollbarExtent: Double =
+    if scrollbar.isManaged then math.max(scrollbar.getWidth, scrollbar.prefWidth(-1)) else 0.0
 
   private def scheduleResize(): Unit =
-    if model.isDefined then
+    if end.isEmpty && model.isDefined then
       resizeTimer.setDuration(Duration.millis(if model.exists(_.frame.modes.alternateScreen) then 100 else 500))
       resizeTimer.playFromStart()
 
@@ -348,10 +407,16 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     * Only a view with room for the canvas and the scrollbar asks for a grid.
     */
   private def requestGridForSize(): Unit =
-    model.foreach { current =>
-      if getWidth > TerminalView.scrollbarWidth && getHeight > 0 then
-        val (cols, rows) = gridForSize()
-        if cols != current.cols || rows != current.rows then calls.resize(session, TermSize(cols = cols, rows = rows))
-    }
+    if end.isEmpty then
+      model.foreach { current =>
+        val extent = scrollbarExtent
+        if getWidth > extent && getHeight > 0 then
+          val (cols, rows) = gridForSize()
+          val wanted = TermSize(cols = cols, rows = rows)
+          // Once per size: the frame lags the request by a round trip, so without this every tick between the two would resend the same grid.
+          if wanted != current.frame.size && !lastRequested.contains(wanted) then
+            lastRequested = Some(wanted)
+            calls.resize(session, wanted)
+      }
 
   private def text(selection: Selection): String = model.map(_.text(selection)).getOrElse("")

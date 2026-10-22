@@ -43,10 +43,10 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
   def close(info: SessionInfo): Unit =
     client.close(info.id, () => ())
 
+  /** The full width, with no scrollbar reserved: a fresh terminal has no history and its scrollbar is hidden, which is also how the view
+    * computes its own first grid — so a new tab is created at exactly the grid the view would ask for and does not regrid (and reprint the
+    * prompt) once it attaches. A scrollbar that appears later changes the content area, and the view's own debounce handles that.
+    */
   def gridFor(width: Double, height: Double): TermSize =
-    if width <= TerminalView.scrollbarWidth || height <= 0 then defaultGrid
-    else
-      TermSize(
-        cols = metrics.layout.colsFor(width - TerminalView.scrollbarWidth),
-        rows = metrics.layout.rowsFor(height)
-      )
+    if width <= 0 || height <= 0 then defaultGrid
+    else TermSize(cols = metrics.layout.colsFor(width), rows = metrics.layout.rowsFor(height))
