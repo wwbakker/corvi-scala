@@ -7,60 +7,63 @@ import java.nio.file.Paths
 import kyo.*
 import kyo.Frame
 
-/** The host side of the protocol: the live sessions, which clients are attached to them, and the fiber that pushes a session's changes.
+/** The host side of the protocol: the live sessions, which clients are connected and which screens they are attached to, and the fiber that
+  * pushes a session's changes.
   *
   * Session lifetime is a fiber's lifetime. `HostSession.open` wants a `Scope` — it registers the PTY's destroy there — and a request
   * handler has no `Scope` of its own, so each session is opened inside a scope of its own in an unscoped fiber, and closing the session is
-  * completing a latch that scope waits on. The registry's map is only written here, and everything in it is immutable.
+  * completing a latch that scope waits on. The registries are only written here, and everything in them is immutable.
+  *
+  * **One registry.** A connection's handler and each of its session baselines live in the same map entry (`Connected`), so a client cannot
+  * be attached to a session and yet have no handler to push to: `bind`, `unbind`, `attach` and every baseline advance are one atomic update
+  * of that map. Keeping them in two maps made exactly that window real — a concurrent bind lost a handler (`bind` was a read-then-write),
+  * the client stayed in a session's attachment map with its socket open, and its screen never updated again.
   *
   * Damage is pushed **per client**, against that client's own baseline frame: a delta computed over a window that straddled an attach would
   * otherwise describe a screen the attaching client never had, and since a delta is absolute, applying it would overwrite newer state. The
-  * baseline advances only when the host has actually sent that client the delta that moves it.
+  * baseline advances only when the host has actually sent that client the delta that moves it, and only if the entry still exists.
   */
 private[corvi] final class HostSessions private (
     command: Seq[String],
     pushInterval: kyo.Duration,
     sessions: AtomicRef[Map[SessionId, HostSessions.Managed]],
-    clients: AtomicRef[Map[ClientId, JsonRpcHandler]],
+    connections: AtomicRef[Map[ClientId, HostSessions.Connected]],
     lastIndex: AtomicInt,
     lastClient: AtomicInt
 ):
   import HostSessions.*
 
-  /** Binds a client's peer handler. An id that is already bound is refused: two peers behind one id would each be pushed a frame the other
-    * never saw.
+  /** Binds a client's peer handler. An id that is already bound is refused and the first handler stays: two peers behind one id would each
+    * be pushed a frame the other never saw.
     *
     * One atomic update, never a read followed by a write: connections bind concurrently at startup, and two read-then-write binds each
-    * write back the map they read, so the later write silently drops the other handler. That client stays in every session's `attached` map
-    * with a live connection and receives nothing — the push loop drops its damage as "no handler", the socket stays open, and the terminal
-    * never paints.
+    * write back the map they read, so the later write silently drops the other handler.
     */
   def bind(client: ClientId, handler: JsonRpcHandler)(using Frame): Boolean < Sync =
-    clients
-      .getAndUpdate(current => if current.contains(client) then current else current.updated(client, handler))
+    connections
+      .getAndUpdate(current => if current.contains(client) then current else current.updated(client, Connected(handler, Map.empty)))
       .map(previous => !previous.contains(client))
 
   /** The clients whose pushes can be delivered, for the registry's own tests: a client that attached but is no longer here receives
     * nothing.
     */
-  private[corvi] def boundClients(using Frame): Map[ClientId, JsonRpcHandler] < Sync = clients.get
+  private[corvi] def boundClients(using Frame): Map[ClientId, JsonRpcHandler] < Sync =
+    connections.get.map(all => all.view.mapValues(_.handler).toMap)
 
-  /** Forgets a client that has gone: its handler is closed with its connection's scope, and its id must not be pushed to afterwards. */
+  /** The whole registry, handler and baselines, for the registry's own tests. */
+  private[corvi] def connectionsByClient(using Frame): Map[ClientId, Connected] < Sync = connections.get
+
+  /** Forgets a client that has gone: its handler is closed with its connection's scope, and its id must not be pushed to afterwards.
+    * Removing the one entry drops every session baseline with it, so no session's push loop can keep sampling a client that is no longer
+    * there.
+    */
   def unbind(client: ClientId)(using Frame): Unit < Sync =
     Sync.defer(forgetUnsafe(client))
 
-  /** The same from a scope finaliser, where an effect cannot be run. The client is dropped from the session baselines too: a closed
-    * connection that stayed in a session's map would keep that session's push loop computing deltas for a client it can never reach.
-    */
+  /** The same from a scope finaliser, where an effect cannot be run. */
   private[corvi] def forgetUnsafe(client: ClientId): Unit =
     import AllowUnsafe.embrace.danger
-    val _ = clients.unsafe.updateAndGet(current => current - client)
-    val _ = sessions.unsafe.updateAndGet(all =>
-      all.map { case (id, managed) =>
-        val _ = managed.attached.unsafe.updateAndGet(frames => frames - client)
-        (id, managed)
-      }
-    )
+    val _ = connections.unsafe.updateAndGet(current => current - client)
 
   /** A fresh client id, unique per connection. */
   def nextClientId(using Frame): ClientId < Sync =
@@ -86,13 +89,23 @@ private[corvi] final class HostSessions private (
     * A client that is already attached keeps its baseline. Resetting it would take deltas that are already in flight out of the client's
     * history, and because a delta's rows are absolute, the frame a client had at the old baseline would be rewound by them and never
     * recover. An attach is therefore authoritative for a client that has no frame yet; a client that has one keeps applying deltas.
+    *
+    * The registration is an update of an *existing* entry, never an insert: a client whose connection ended while the snapshot was being
+    * taken must not be put back into the registry, or it would be sampled forever with no handler (the bug the single map exists to
+    * prevent).
     */
   def attach(client: ClientId, id: SessionId)(using Frame): Snapshot < (Async & Abort[UnknownSession]) =
     for
       managed <- lookup(id)
       snapshot <- Sync.defer(managed.session.snapshot())
-      _ <- managed.attached
-        .updateAndGet(frames => if frames.contains(client) then frames else frames.updated(client, snapshot))
+      _ <- connections
+        .updateAndGet(current =>
+          current.updatedWith(client) { existing =>
+            existing.map(connected =>
+              if connected.attached.contains(id) then connected else connected.copy(attached = connected.attached.updated(id, snapshot))
+            )
+          }
+        )
         .map(_ => ())
     yield snapshot
 
@@ -106,7 +119,11 @@ private[corvi] final class HostSessions private (
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.resize(size))
 
-  /** Closes the shell and ends the scope that owned it. The session's push loop then reports the end and stops. */
+  /** Closes the shell and ends the scope that owned it. The session's push loop reports the end to every client still attached to it — a
+    * client that closes a session still expects `session.ended` — and only then drops their baselines, because the end is the last thing
+    * the session ever says. `close` therefore never drops a baseline itself: doing it here would race a shell that exited naturally in the
+    * same tick and take the watchers away before the loop could tell them.
+    */
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[UnknownSession]) =
     for
       managed <- lookup(id)
@@ -115,6 +132,12 @@ private[corvi] final class HostSessions private (
       _ <- managed.stop.release
       _ <- sessions.updateAndGet(_ - id).map(_ => ())
     yield ()
+
+  /** Forgets a session's baseline in every client: the session is gone, so nothing may keep sampling it. */
+  private def dropBaselines(id: SessionId)(using Frame): Unit < Sync =
+    connections
+      .updateAndGet(current => current.map { case (client, connected) => client -> connected.copy(attached = connected.attached - id) })
+      .map(_ => ())
 
   /** Ends every session: the scope that owns this service calls it, and each session's own scope follows. */
   def shutdown(using Frame): Unit < (Async & Abort[Throwable]) =
@@ -127,6 +150,7 @@ private[corvi] final class HostSessions private (
         yield ()
       }
       _ <- sessions.set(Map.empty[SessionId, Managed])
+      _ <- connections.set(Map.empty[ClientId, Connected])
     yield ()
 
   private def lookup(id: SessionId)(using Frame): Managed < (Sync & Abort[UnknownSession]) =
@@ -186,55 +210,51 @@ private[corvi] final class HostSessions private (
         case Maybe.Present(Result.Failure(error)) => Abort.fail(SessionFailed(id, error.toString))
         case Maybe.Present(Result.Panic(error))   => Abort.fail(SessionFailed(id, error.toString))
         case Maybe.Absent                         => Abort.fail(SessionFailed(id, "the shell did not start"))
-      attached <- AtomicRef.init(Map.empty[ClientId, Snapshot])
       closed <- AtomicRef.init(false)
-    yield Managed(session, stop, attached, closed)
+    yield Managed(session, stop, closed)
 
   private def startPush(managed: Managed)(using Frame): Unit < Sync =
     Fiber.initUnscoped(pushLoop(managed)).map(_ => ())
 
-  /** Pushes what changed to each attached client, until the shell is gone. Sampling is the coalescer: everything that arrived since the
-    * previous tick leaves as one delta per client, an unchanged frame costs nothing on the wire, and a session nobody is watching is not
-    * sampled at all.
+  /** Pushes what changed to each client attached to this session, until the shell is gone. Sampling is the coalescer: everything that
+    * arrived since the previous tick leaves as one delta per client, an unchanged frame costs nothing on the wire, and a session nobody is
+    * watching is not sampled at all.
     */
   private def pushLoop(managed: Managed)(using Frame): Unit < Async =
     def loop: Unit < Async =
       for
         _ <- Async.sleep(pushInterval)
-        attached <- managed.attached.get
-        _ <- if attached.isEmpty then Sync.defer(()) else pushDamage(managed, attached)
+        _ <- pushDamage(managed)
         _ <- if managed.session.info.running then loop else pushEnded(managed)
       yield ()
     loop
 
-  private def pushDamage(managed: Managed, attached: Map[ClientId, Snapshot])(using Frame): Unit < Async =
+  private def pushDamage(managed: Managed)(using Frame): Unit < Async =
     def one(client: ClientId, baseline: Snapshot): Unit < Async =
       for
         step <- Sync.defer(managed.session.frameSince(baseline))
         (frame, damage) = step
         _ <- if damage.isEmpty then Sync.defer(()) else push(client, Methods.Damage, DamageParams(frame.id, damage))
-        // The baseline only moves once the delta has been sent, so a failed send leaves this client where it was and the next tick
-        // recomputes from there. `updatedWith` keeps a client that `forgetUnsafe` removed while this tick was in flight out of the map:
-        // `updated` would put it back, and it would be sampled again forever with no handler to push to.
-        _ <- managed.attached
-          .updateAndGet(frames => frames.updatedWith(client)(current => current.map(_ => frame)))
+        // The baseline moves with the delta, whether or not the send was delivered: `send` logs a failure and carries on, because a failed
+        // push means the peer's connection is gone and its unbind removes the entry. `updatedWith` on the entry and on the session keeps a client, or a session, that was unbound or closed
+        // while this tick was in flight out of the registry: `updated` would put it back and sample it forever.
+        _ <- connections
+          .updateAndGet(current =>
+            current.updatedWith(client) { existing =>
+              existing.map(connected =>
+                connected.copy(attached = connected.attached.updatedWith(managed.session.id)(current => current.map(_ => frame)))
+              )
+            }
+          )
           .map(_ => ())
       yield ()
     for
-      handlers <- clients.get
-      // A client whose handler has gone is dropped from this session's baselines the first time a tick finds it: the map is supposed to be
-      // cleaned with the connection, so a missing handler is a bookkeeping slip, and it is reported once — the removal is what stops the
-      // report repeating at the push loop's 60 Hz.
-      stale = attached.keys.filterNot(handlers.contains)
-      _ <- Async.foreachDiscard(stale.toVector) { client =>
-        managed.attached.updateAndGet(frames => frames - client).map { _ =>
-          java.lang.System.err.println(
-            s"corvi host: no handler for ${client.value}; dropping it from ${managed.session.id.value}"
-          )
-        }
+      current <- connections.get
+      watchers = current.toVector.collect {
+        case (client, connected) if connected.attached.contains(managed.session.id) =>
+          (client, connected.attached(managed.session.id))
       }
-      live = attached.filter((client, _) => handlers.contains(client))
-      _ <- Async.foreachDiscard(live.toVector)((client, baseline) => one(client, baseline))
+      _ <- Async.foreachDiscard(watchers)((client, baseline) => one(client, baseline))
     yield ()
 
   private def pushEnded(managed: Managed)(using Frame): Unit < Async =
@@ -242,28 +262,26 @@ private[corvi] final class HostSessions private (
       closed <- managed.closed.get
       code <- Sync.defer(managed.session.exitCode)
       reason <- Sync.defer(managed.session.error.map(_.toString))
-      attached <- managed.attached.get
-      handlers <- clients.get
+      current <- connections.get
       ended = Ended(code = code, closed = closed, reason = reason)
-      _ <- Async.foreachDiscard(attached.keys.toVector) { client =>
-        handlers.get(client) match
-          case Some(handler) => send(handler, Methods.Ended, EndedParams(managed.session.id, ended))
-          case None          => Sync.defer(())
+      watchers = current.toVector.collect {
+        case (client, connected) if connected.attached.contains(managed.session.id) => (client, connected.handler)
       }
+      _ <- Async.foreachDiscard(watchers)((_, handler) => send(handler, Methods.Ended, EndedParams(managed.session.id, ended)))
+      // The end is the session's last message: once it has been sent, the baselines it was sent to are dropped.
+      _ <- dropBaselines(managed.session.id)
     yield ()
 
-  /** A push to a client whose connection has gone is a bug the host can see: the baseline map is supposed to forget it with the connection,
-    * so a missing handler means that bookkeeping slipped rather than a peer that is merely slow.
+  /** A push reads the handler from the same registry as the baseline. The only race left is a client whose connection ends between the
+    * tick's snapshot and this send; that client is gone, so the push is dropped rather than reported — it is not bookkeeping slipping, it
+    * is a peer that has left.
     */
   private def push[A: Schema](client: ClientId, method: String, params: A)(using Frame): Unit < Async =
     for
-      handlers <- clients.get
-      _ <- handlers.get(client) match
-        case Some(handler) => send(handler, method, params)
-        case None          =>
-          Sync.defer(
-            java.lang.System.err.println(s"corvi host: no handler for ${client.value}; dropping $method")
-          )
+      current <- connections.get
+      _ <- current.get(client) match
+        case Some(connected) => send(connected.handler, method, params)
+        case None            => Sync.defer(())
     yield ()
 
   /** A push to a client that has gone away is not the host's problem: the send fails with `Closed` and the loop carries on. */
@@ -275,13 +293,13 @@ private[corvi] final class HostSessions private (
     }
 
 private[corvi] object HostSessions:
-  /** A session, the latch that ends the scope holding it, each client's baseline frame, and whether a client ended it. */
-  private[corvi] final case class Managed(
-      session: HostSession,
-      stop: Latch,
-      attached: AtomicRef[Map[ClientId, Snapshot]],
-      closed: AtomicRef[Boolean]
-  )
+  /** One connection: its peer handler, and this client's baseline frame for every session it has attached to. One entry, because a client
+    * with a baseline and no handler is a screen that never updates again.
+    */
+  private[corvi] final case class Connected(handler: JsonRpcHandler, attached: Map[SessionId, Snapshot])
+
+  /** A session, the latch that ends the scope holding it, and whether a client ended it. */
+  private[corvi] final case class Managed(session: HostSession, stop: Latch, closed: AtomicRef[Boolean])
 
   /** The shell to run is a parameter so a caller can prove what a shell that cannot start does. `pushInterval` is too, so a test does not
     * have to wait a frame.
@@ -289,7 +307,7 @@ private[corvi] object HostSessions:
   def init(pushInterval: kyo.Duration, command: Seq[String])(using Frame): HostSessions < Sync =
     for
       sessions <- AtomicRef.init(Map.empty[SessionId, Managed])
-      clients <- AtomicRef.init(Map.empty[ClientId, JsonRpcHandler])
+      connections <- AtomicRef.init(Map.empty[ClientId, Connected])
       lastIndex <- AtomicInt.init(0)
       lastClient <- AtomicInt.init(0)
-    yield new HostSessions(command, pushInterval, sessions, clients, lastIndex, lastClient)
+    yield new HostSessions(command, pushInterval, sessions, connections, lastIndex, lastClient)

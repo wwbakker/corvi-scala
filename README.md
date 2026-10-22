@@ -62,6 +62,8 @@ parts that need a real PTY, a real daemon or a real scene. Each probe prints `PA
 failure.
 
 ```bash
+./verify                                                # format check, every suite, then the five probe mains
+./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
 ./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
 ./mill -i renderer.test                                 # 14 JUnit tests: ScreenModel, Layout, Selection
@@ -230,7 +232,9 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   `corvi.host.BindTest` (64 concurrent binds over 8 threads) fails against the old read-then-set and passes against `getAndUpdate`.
 - **A second, empty window.** `JFXApp3.AutoShow` is off, the primary stage is the only window, and it is shown immediately with a
   `StatusView` placeholder ("Connecting to the host…") that is replaced by the shell when the client answers — or by the failure, in the
-  window. Nothing waits on the FX thread for the host.
+  window. Nothing waits on the FX thread for the host. `UiTest` asserts the one window over the same `AppWindow` assembly `ShellApp` uses;
+  the `JFXApp3`/`AutoShow` wiring itself is covered by running the app (`./mill --no-daemon app.run`), because a second
+  `Application.launch` in one test JVM is not possible.
 
 ## Known limitations
 

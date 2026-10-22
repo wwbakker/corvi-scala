@@ -57,6 +57,14 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     */
   private var pendingDamage: Vector[Damage] = Vector.empty
 
+  /** How much damage a view that has not attached yet may hold. The host can push before the attach answer lands, so the deltas are kept
+    * until the seed arrives — but a view whose attach never completes must not grow the window's memory with a session it will never show.
+    * The newest deltas win, and dropping the oldest is lossy: a row whose only change fell outside the window keeps the seed's older value
+    * until it changes again, so a view attaching after a gap of roughly two seconds (128 ticks at 60 Hz) may show stale cells in rows that
+    * are otherwise idle.
+    */
+  private val maxPendingDamage: Int = 128
+
   /** How far one wheel notch moves the view. */
   private val stepsPerWheel: Int = 3
 
@@ -130,6 +138,9 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   def screen: Option[ScreenModel] = model
 
   def frame: Option[corvi.contract.Frame] = model.map(_.frame)
+
+  /** How many deltas are waiting for the attach; for the renderer's own tests. */
+  private[corvi] def pendingDamageCount: Int = pendingDamage.size
 
   def ended: Option[Ended] = end
 
@@ -291,7 +302,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     if !damage.isEmpty then activityListeners.foreach(listener => listener())
     model match
       case Some(_) => applyToModel(damage); redraw()
-      case None    => pendingDamage = pendingDamage :+ damage
+      case None    => pendingDamage = (pendingDamage :+ damage).takeRight(maxPendingDamage)
 
   private def applyToModel(damage: Damage): Unit =
     model.foreach { current =>

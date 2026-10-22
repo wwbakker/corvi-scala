@@ -23,13 +23,11 @@ import kyo.Frame
 final class Client(val service: TerminalService, val sink: ViewSink) extends SessionCalls:
   import Client.Command
 
-  private val commands: LinkedBlockingQueue[Client.Command] = new LinkedBlockingQueue[Client.Command]()
-
-  /** Whether the client has been stopped for good. Commands are queued from the moment the client exists: starting the serving fiber only
-    * *schedules* it, so a caller — an FX callback, a view attaching to the session the window just opened — can offer a command before the
-    * fiber has run a single line. Dropping those offers is a terminal that never receives its snapshot, i.e. a black window.
+  /** Commands are queued from the moment the client exists: starting the serving fiber only *schedules* it, so a caller — an FX callback, a
+    * view attaching to the session the window just opened — can offer a command before the fiber has run a single line. Dropping those
+    * offers is a terminal that never receives its snapshot, i.e. a black window.
     */
-  private val stopped: AtomicBoolean = new AtomicBoolean(false)
+  private val commands: Client.Queue = new Client.Queue
 
   /** A new session at this grid, delivered on the FX thread: `None` when the host refused, and nothing is shown until it arrives. */
   def create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit): Unit =
@@ -50,13 +48,11 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   def close(session: SessionId): Unit = offer(Command.Close(session, None))
 
-  /** Ends the client's runtime. Commands queued before this are served; nothing is accepted after it. A command can pass the `stopped`
-    * check just before it flips and land after `Stop`, which is fine: that happens only while the window is closing, and the serve loop
-    * ends at `Stop` rather than waiting for a quiet queue.
+  /** Ends the client's runtime. Commands queued before this are served; the close marker ends the loop, and anything offered afterwards is
+    * inert. Closing is one atomic step on the queue itself, so no command can slip past a check and be served after the close.
     */
   def stop(): Unit =
-    stopped.set(true)
-    val _ = commands.offer(Command.Stop)
+    val _ = commands.close()
 
   private def onFx(action: () => Unit): Unit =
     // The one FX hop: nothing else here knows that JavaFX exists.
@@ -72,18 +68,18 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
       for
         command <- Sync.defer(commands.take())
         step <- command match
-          case Command.Stop                    => Sync.defer((events, true))
-          case Command.Create(cwd, size, made) =>
+          case None                                  => Sync.defer((events, true))
+          case Some(Command.Create(cwd, size, made)) =>
             created(service.create(cwd, size))(made).map(_ => (events, false))
-          case Command.Close(id, done) =>
+          case Some(Command.Close(id, done)) =>
             closed(service.close(id))(done).map(_ => (events - id, false))
-          case Command.Attach(id, target) =>
+          case Some(Command.Attach(id, target)) =>
             attached(service.attach(id))(target).map(_ => (events.updated(id, target), false))
-          case Command.Text(id, text) =>
+          case Some(Command.Text(id, text)) =>
             perform(events.get(id), "text")(service.text(id, text)).map(_ => (events, false))
-          case Command.Resize(id, size) =>
+          case Some(Command.Resize(id, size)) =>
             perform(events.get(id), "resize")(service.resize(id, size)).map(_ => (events, false))
-          case Command.History(id, from, count) =>
+          case Some(Command.History(id, from, count)) =>
             performed(events.get(id), "history")(service.history(id, from, count))(rows =>
               events.get(id).foreach(target => onFx(() => target.history(rows.toVector)))
             ).map(_ => (events, false))
@@ -93,9 +89,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
     loop(Map.empty)
 
-  private def offer(command: Command): Unit =
-    if !stopped.get() then
-      val _ = commands.offer(command)
+  private def offer(command: Command): Unit = commands.offer(command)
 
   /** Creating is the one call whose result the shell needs, so a refusal is delivered as `None` rather than only logged. */
   private def created(operation: SessionInfo < (Async & Abort[TerminalError | Closed]))(
@@ -177,12 +171,41 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
 private[app] object Client:
 
-  /** What a caller can ask the client's runtime to do. `Stop` ends the loop and is a normal end. */
-  private enum Command:
-    case Stop
+  /** What a caller can ask the client's runtime to do. Closing the queue ends the loop and is a normal end; there is no `Stop` command,
+    * because a command that raced the close would then have to be dropped by the loop instead of by the queue.
+    */
+  private[app] enum Command:
     case Create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit)
     case Close(session: SessionId, onClosed: Option[() => Unit])
     case Attach(session: SessionId, events: SessionEvents)
     case Text(session: SessionId, text: String)
     case Resize(session: SessionId, size: TermSize)
     case History(session: SessionId, from: Int, count: Int)
+
+  /** The commands FX offers the client's runtime, and the close that ends it.
+    *
+    * A Kyo `Channel` would be the idiomatic queue, but its producer here is the JavaFX thread, which cannot run an effect: `Channel.offer`
+    * is effectful and bounded, and an unbounded FX-facing offer is exactly what is missing. A plain `ConcurrentLinkedQueue` has the offer
+    * but no close, so a command could be accepted after the consumer had ended. This queue closes once — the marker is appended atomically,
+    * the consumer ends when it reaches it, and an offer that races the close can only land behind the marker, where nothing will read it.
+    */
+  private[app] final class Queue:
+    private val commands: LinkedBlockingQueue[Maybe[Command]] = new LinkedBlockingQueue[Maybe[Command]]()
+    private val closed: AtomicBoolean = new AtomicBoolean(false)
+
+    def offer(command: Command): Unit =
+      if !closed.get() then
+        val _ = commands.offer(Maybe.Present(command))
+
+    /** Ends the queue once; later calls are no-ops. */
+    def close(): Boolean =
+      val alreadyClosed = closed.getAndSet(true)
+      if !alreadyClosed then
+        val _ = commands.offer(Maybe.Absent)
+      !alreadyClosed
+
+    /** Blocks until the next command, or `None` once the queue has been closed. */
+    def take(): Option[Command] =
+      commands.take() match
+        case Maybe.Present(command) => Some(command)
+        case Maybe.Absent           => None

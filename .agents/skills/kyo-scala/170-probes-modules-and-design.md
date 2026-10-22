@@ -99,6 +99,8 @@ which drive the real thing:
   no view left in a sink after its tab closes, no `TerminalEmulator-*` thread after a session ends.
 - **They clean up**: stop the harness host, close the stage, `System.exit`.
 
+`./verify` runs the suites (and, without `--quick`, the probes) in one step; `./verify --quick` is the suite-only gate.
+
 The full set, and the command for each:
 
 | probe | what it covers |
