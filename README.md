@@ -119,10 +119,25 @@ for this code base is the first-party skill in [`.agents/skills/kyo-scala/`](.ag
 | `ctrl-b <n>` | switch to window `n` — **0-based** |
 | `⌘W` (macOS) | close the terminal on screen |
 | right-click a tab → `Close tab` | close it, on any platform |
+| `⌘C` / `ctrl-shift-C` | copy the selection |
+| `⌘V` / `ctrl-shift-V` | paste |
 
-Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. Input is **paste-and-edit**: printable keys,
-Backspace, Enter, Tab and Escape are forwarded; arrows, modified keys and mouse reports need the host's mode-dependent
-encoding and a `session.key`/`session.mouse` route, which is a renderer follow-up.
+### Keys
+
+**Control keys work, with a terminal's meanings.** Control and a letter is sent as its C0 byte (Ctrl+A `^A` … Ctrl+Z `^Z`, Ctrl+Space
+NUL, Ctrl+`[` Escape, Ctrl+`?` Delete), so **Ctrl+C interrupts** and **Ctrl+D ends the shell** — the host's PTY receives the byte and
+does the rest. Copy and paste are the window's own chords: **⌘C / ⌘V on macOS**, and **Ctrl+Shift+C / Ctrl+Shift+V** as the alias
+elsewhere. Ctrl+C is never a copy chord; the plain printable keys, Shift-only characters, Backspace (`^?`), Enter, Tab and Escape are
+forwarded as before, and a shortcut's typed companion (the `c` the platform sends after ⌘C) is swallowed rather than typed.
+
+**Option-composed characters pass through**: Option+E / Option+U / Option+A / Option+5 / Option+G enter é/ü/å/∞/© as the platform composes
+them, because Alt is not treated as a shortcut here — its `KEY_TYPED` is the text. Alt-as-Meta/Alt-as-Escape is **not** forwarded: Alt is
+passed as a composed character, not as the terminal's Meta prefix.
+
+Paste is **not** wrapped in bracketed-paste escapes: a multi-line paste runs each line, so pasting a script executes it (Corvi's own
+bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. **Arrow keys,
+modified function keys and mouse reports are still not forwarded**: they need the host's mode-dependent encoding and a `session.key`/`session.mouse` route, which is a renderer
+follow-up.
 
 ## Where the state lives
 
@@ -227,7 +242,8 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **Input is paste-and-edit** (see above). Mouse reporting and key encoding live in the host's future, not here.
+- **Arrow keys and mouse reports are not forwarded** (see [Keys](#keys)). Control keys, copy and paste are; the mode-dependent key and
+  mouse encoding lives in the host's future.
 - **No find, no hyperlinks** in the renderer, and no IME.
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.

@@ -6,7 +6,7 @@ import javafx.animation.PauseTransition
 import javafx.application.Platform
 import javafx.geometry.{Insets, Orientation}
 import javafx.scene.control.ScrollBar
-import javafx.scene.input.{KeyCode, MouseButton, ScrollEvent}
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, MouseButton, ScrollEvent}
 import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
 import javafx.scene.paint.Color
 import javafx.util.Duration
@@ -78,22 +78,36 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = widthProperty().addListener((_, _, _) => scheduleResize())
     val _ = heightProperty().addListener((_, _, _) => scheduleResize())
     // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
-    // control codes the shell would not recognise (`` where macOS's `stty erase` expects `^?`). Arrows are not forwarded yet: they need
-    // the host's mode-dependent key encoding, and until it exists this build is paste-and-edit only.
+    // control codes the shell would not recognise (`\b` where macOS's `stty erase` expects `^?`). A Command or Control shortcut's typed
+    // companion is ignored: the platform sends a KEY_TYPED for the same keystroke even when the window took it, and \u2318C must not also
+    // type a "c". Option is deliberately not in that test: an Option-composed character *is* this event, with Alt still down, and it is the
+    // text the shell should receive. Arrows are still not forwarded: they need the host's mode-dependent key encoding.
     val _ = setOnKeyTyped { event =>
       val typed = event.getCharacter
-      if typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then calls.text(session, typed)
+      val shortcut = event.isMetaDown || event.isControlDown
+      if !shortcut && typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then calls.text(session, typed)
     }
     val _ = setOnKeyPressed { event =>
-      if event.isShortcutDown && event.getCode == KeyCode.C then
+      val code = event.getCode
+      val meta = event.isMetaDown
+      val control = event.isControlDown
+      val shift = event.isShiftDown
+      val alt = event.isAltDown
+      // Copy and paste are the window's own chords, decided before anything is sent: a terminal keeps Ctrl+C for SIGINT, so copy is
+      // Cmd+C (or Ctrl+Shift+C as the alias). Control codes then carry every other Control chord to the shell.
+      if ControlKeys.isCopy(code, meta, control, shift, alt) then
+        event.consume()
         val _ = copySelection()
-      else
-        event.getCode match
-          case KeyCode.BACK_SPACE => calls.text(session, "\u007f")
-          case KeyCode.ENTER      => calls.text(session, "\r")
-          case KeyCode.TAB        => calls.text(session, "\t")
-          case KeyCode.ESCAPE     => calls.text(session, "\u001b")
-          case _                  => ()
+      else if ControlKeys.isPaste(code, meta, control, shift, alt) then
+        event.consume()
+        pasteClipboard()
+      else if control && !meta && !alt then
+        ControlKeys.controlByte(code, shift) match
+          case Some(bytes) =>
+            event.consume()
+            calls.text(session, bytes)
+          case None => editingKey(code, event)
+      else editingKey(code, event)
     }
     val _ = setOnMousePressed(event =>
       if event.getButton == MouseButton.PRIMARY then
@@ -150,12 +164,34 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   def copySelection(): String =
     val copied = selectedText.getOrElse("")
     if copied.nonEmpty then
-      val _ = Try {
-        val content = javafx.scene.input.ClipboardContent()
+      Try {
+        val content = ClipboardContent()
         content.putString(copied)
-        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content)
-      }
+        Clipboard.getSystemClipboard().setContent(content)
+      }.failed.foreach(error => report(s"the clipboard refused the selection: $error"))
     copied
+
+  /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. */
+  def pasteClipboard(): Unit =
+    val pasted = Try(Option(Clipboard.getSystemClipboard().getString)).toOption.flatten.getOrElse("")
+    if pasted.nonEmpty then calls.text(session, pasted)
+
+  /** The keys that are sent as themselves rather than as a character: Backspace is `^?` (what macOS's `stty erase` expects), and Enter, Tab
+    * and Escape are the bytes a terminal sends for them.
+    */
+  private def editingKey(code: KeyCode, event: javafx.scene.input.KeyEvent): Unit =
+    val bytes = code match
+      case KeyCode.BACK_SPACE => Some("\u007f")
+      case KeyCode.ENTER      => Some("\r")
+      case KeyCode.TAB        => Some("\t")
+      case KeyCode.ESCAPE     => Some("\u001b")
+      case _                  => None
+    bytes.foreach { sent =>
+      event.consume()
+      calls.text(session, sent)
+    }
+
+  private def report(message: String): Unit = java.lang.System.err.println(s"corvi renderer: $message")
 
   /** Turns cursor blinking off (or on) for good: the frame asks for blinking on every damage and this must still win, or a capture taken
     * after any output would be a coin flip.

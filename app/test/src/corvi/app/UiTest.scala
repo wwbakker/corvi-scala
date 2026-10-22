@@ -10,8 +10,9 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.application.Platform
 import javafx.event.Event
 import javafx.scene.Node
+import javafx.scene.Scene
 import javafx.scene.control.{ContextMenu, Label, MenuItem}
-import javafx.scene.input.{ContextMenuEvent, MouseButton, MouseEvent, PickResult}
+import javafx.scene.input.{ContextMenuEvent, KeyCode, KeyEvent, MouseButton, MouseEvent, PickResult}
 import javafx.scene.Parent
 import javafx.scene.layout.FlowPane
 import javafx.stage.{Stage, Window}
@@ -64,6 +65,7 @@ final class UiTest:
       assertTrue(onFx(stage.getScene.getRoot.lookup(".status-view") != null), "the placeholder is what the window shows while it connects")
 
       val shell = awaitShell(app)
+      val scene = onFx(stage.getScene)
       awaitSelectedPrompt(shell)
       assertEquals(3, tabs(shell).size, "Overview, one window, and new")
       assertEquals(1, currentTabIndex(shell), "the first window is the current tab (the strip's index 1, after Overview)")
@@ -115,6 +117,28 @@ final class UiTest:
       assertTrue(await(waitTimeout)(onFx(tab(shell, 1).getStyleClass.contains("ended"))), "the tab says ended")
       assertTrue(labelOf(shell, 1).exists(_.contains("(exit ")), s"the label carries the code: ${labelOf(shell, 1)}")
       assertFalse(bellOn(shell, 1), "an ended tab does not bell")
+
+      // Control keys through the whole path: a command that blocks, ^C interrupting it, and ^D ending the session. The next command only
+      // runs if ^C actually reached the PTY: otherwise the shell is still inside the blocking command and merely echoes the line.
+      // The strip is `Overview | windows… | new`, so the last child is `new` and the window it opens is the second to last.
+      val beforeControl = tabs(shell).size
+      click(tab(shell, beforeControl - 1))
+      awaitTabs(shell, beforeControl + 1)
+      val controlSession = sessionOf(shell, beforeControl - 1)
+      awaitFocus(shell, controlSession)
+      typeInto(shell, controlSession, "printf 'STARTED_%s\n' ONE; sleep 100\r")
+      assertTrue(await(waitTimeout)(frameHas(shell, controlSession, "STARTED_ONE")), "the shell started a command that then blocks")
+      pressKey(scene, KeyCode.C, control = true, meta = false, shift = false)
+      typeInto(shell, controlSession, "printf 'AFTER_%s\n' INT\r")
+      assertTrue(
+        await(waitTimeout)(frameHas(shell, controlSession, "AFTER_INT")),
+        "^C interrupted the blocked command and the prompt took input again"
+      )
+      pressKey(scene, KeyCode.D, control = true, meta = false, shift = false)
+      assertTrue(
+        await(waitTimeout)(onFx(viewOf(shell, controlSession).exists(_.ended.isDefined))),
+        "^D at the prompt ended the session"
+      )
 
       // Still one window: nothing above opened a second one.
       assertEquals(1, showingWindows(), "the run still has exactly one window")
@@ -224,6 +248,21 @@ final class UiTest:
   /** Types into a window's own terminal, through the same path a keystroke takes. */
   private def typeInto(shell: ShellView, session: corvi.contract.SessionId, text: String): Unit =
     onFx(viewOf(shell, session)).foreach(_.typeText(text))
+
+  /** Whether the session's screen has a line containing this text. */
+  private def frameHas(shell: ShellView, session: SessionId, text: String): Boolean =
+    onFx(
+      viewOf(shell, session).flatMap(_.frame).exists(frame => frame.rows.exists(row => row.cells.map(_.text).mkString.contains(text)))
+    )
+
+  /** A key the way a person sends it: at the window's focus owner, so the scene's chord filter sees it first and then the terminal's own
+    * key handler — the path `press` above skips.
+    */
+  private def pressKey(scene: Scene, code: KeyCode, control: Boolean, meta: Boolean, shift: Boolean): Unit =
+    val _ = onFx {
+      val target = Option(scene.getFocusOwner).getOrElse(scene.getRoot)
+      Event.fireEvent(target, new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, shift, control, false, meta))
+    }
 
   // --- the events a person sends -----------------------------------------------------------------------------------------------------
 

@@ -92,9 +92,10 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
         val (next, outcome) = Chords.press(chords.value, key, mac, java.lang.System.nanoTime())
         chords.value = next
         outcome match
-          case Chords.Outcome.Passed      => ()
-          case Chords.Outcome.PrefixArmed => event.consume()
-          case Chords.Outcome.Open        =>
+          case Chords.Outcome.Passed         => ()
+          case Chords.Outcome.PassedShortcut => ()
+          case Chords.Outcome.PrefixArmed    => event.consume()
+          case Chords.Outcome.Open           =>
             event.consume()
             newWindow()
           case Chords.Outcome.CloseSelected =>
@@ -108,7 +109,7 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
     val _ = scene.addEventFilter(
       KeyEvent.KEY_TYPED,
       (event: KeyEvent) => {
-        val (next, swallowed) = Chords.typed(chords.value)
+        val (next, swallowed) = Chords.typed(chords.value, java.lang.System.nanoTime())
         chords.value = next
         if swallowed then event.consume()
       }
