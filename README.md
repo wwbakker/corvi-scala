@@ -43,9 +43,14 @@ exactly as the host holds it. (If the *host* dies, the shells are gone — see t
 ## Running it
 
 ```bash
-./mill app.run                                   # the Corvi window (starts the host if needed)
-./mill host.runMain corvi.host.HostMain          # the daemon alone, in the foreground
+./mill --no-daemon app.run                       # the Corvi window (starts the host if needed)
+./mill --no-daemon host.runMain corvi.host.HostMain   # the daemon alone, in the foreground
 ```
+
+> Use `--no-daemon` (equivalently `-i`) on this machine: Mill 1.3.0's **daemon** can die at startup with
+> `Mill daemon terminated unexpectedly` / `watchProcessIdFile: processId file missing` before the build is
+> defined. That is Mill's daemon/launcher race, not this app — the window and host are unaffected when Mill
+> runs in-process (`./mill -i app.run` also works). The probes below already use `-i`.
 
 The probes are the test suite — each prints `PASS`/`FAIL` per check and exits non-zero on failure:
 
