@@ -1,0 +1,282 @@
+package corvi.renderer
+
+import corvi.contract.*
+import corvi.protocol.*
+import javafx.animation.PauseTransition
+import javafx.application.Platform
+import javafx.geometry.{Insets, Orientation}
+import javafx.scene.control.ScrollBar
+import javafx.scene.input.{KeyCode, MouseButton, ScrollEvent}
+import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
+import javafx.scene.paint.Color
+import javafx.util.Duration
+import kyo.*
+import kyo.Frame
+import scala.util.Try
+
+/** One terminal on screen: the canvas, its scrollbar, and the input that goes back to the host.
+  *
+  * It is the client's view of a session and nothing more. Pushes arrive from the host's fiber through `FrameSink` and are handed to the FX
+  * thread; everything the runtime says back arrives through `SessionEvents`, already on the FX thread. Requests (text, resize, history) go
+  * the other way through `TerminalSession`, so this class never enters an effect and the runtime never touches a node.
+  *
+  * Resizing is debounced here rather than in the host: the host applies what it is told, and the side that owns the window is the only one
+  * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
+  * full-screen program repainting on every step would be the expensive part.
+  */
+final class TerminalView(service: TerminalService, session: SessionId, metrics: TerminalMetrics)
+    extends BorderPane
+    with FrameSink
+    with SessionEvents:
+
+  private val style: TerminalStyle = TerminalStyle.default
+  private val canvas: TerminalCanvas = TerminalCanvas(metrics, style)
+  private val scrollbar: ScrollBar = new ScrollBar()
+  scrollbar.setOrientation(Orientation.VERTICAL)
+  private val bridge: TerminalSession = TerminalSession(service, session, this)
+
+  private var model: Option[ScreenModel] = None
+  private var selection: Option[Selection] = None
+  private var failure: Option[String] = None
+  private var end: Option[Ended] = None
+  private var blinking: Boolean = false
+  private var blinkOverride: Option[Boolean] = None
+  private var liveBefore: Boolean = true
+
+  /** How far one wheel notch moves the view. */
+  private val stepsPerWheel: Int = 3
+
+  /** Requests the host takes a while to answer are coalesced: a resize waits for the drag to stop, and the timer's delay follows the mode
+    * the frame is in.
+    */
+  private val resizeTimer = PauseTransition(Duration.millis(500))
+
+  locally:
+    setFocusTraversable(true)
+    setCenter(canvas)
+    setRight(scrollbar)
+    // The view itself is the terminal's colour, so the pixels between the grid and the window edge are not the toolkit's theme.
+    setBackground(Background(BackgroundFill(Color.rgb(13, 17, 23), CornerRadii.EMPTY, Insets.EMPTY)))
+    scrollbar.setVisible(false)
+    // The scrollbar runs the other way round from the model: its bottom is the live grid, because that is where a scrollbar's "end" is.
+    val _ = scrollbar.valueProperty().addListener((_, _, value) => scrollTo(math.round(scrollbar.getMax() - value.doubleValue()).toInt))
+    val _ = focusedProperty().addListener((_, _, focused) => canvas.setBaseFocus(focused))
+    val _ = widthProperty().addListener((_, _, _) => scheduleResize())
+    val _ = heightProperty().addListener((_, _, _) => scheduleResize())
+    // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
+    // control codes the shell would not recognise (`` where macOS's `stty erase` expects `^?`). Arrows are not forwarded yet: they need
+    // the host's mode-dependent key encoding, and until it exists this build is paste-and-edit only.
+    val _ = setOnKeyTyped { event =>
+      val typed = event.getCharacter
+      if typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then bridge.requestText(typed)
+    }
+    val _ = setOnKeyPressed { event =>
+      if event.isShortcutDown && event.getCode == KeyCode.C then
+        val _ = copySelection()
+      else
+        event.getCode match
+          case KeyCode.BACK_SPACE => bridge.requestText("\u007f")
+          case KeyCode.ENTER      => bridge.requestText("\r")
+          case KeyCode.TAB        => bridge.requestText("\t")
+          case KeyCode.ESCAPE     => bridge.requestText("\u001b")
+          case _                  => ()
+    }
+    val _ = setOnMousePressed(event =>
+      if event.getButton == MouseButton.PRIMARY then
+        requestFocus()
+        selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
+        redraw()
+    )
+    val _ = setOnMouseDragged(event =>
+      selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
+      redraw()
+    )
+    val _ = setOnScroll((event: ScrollEvent) => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel))
+    resizeTimer.setOnFinished(_ => requestGridForSize())
+    bridge.start()
+
+  def screen: Option[ScreenModel] = model
+
+  def frame: Option[corvi.contract.Frame] = model.map(_.frame)
+
+  def ended: Option[Ended] = end
+
+  def error: Option[String] = failure
+
+  def selectedText: Option[String] = selection.filterNot(_.isEmpty).map(cells => text(cells))
+
+  /** Types without a keyboard, which is how a harness drives a session. Real input arrives through the key handler below and takes the same
+    * path.
+    */
+  def typeText(text: String): Unit = bridge.requestText(text)
+
+  def select(from: CellPosition, to: CellPosition): Unit =
+    selection = Some(Selection(from, to))
+    redraw()
+
+  def clearSelection(): Unit =
+    selection = None
+    redraw()
+
+  /** The selection as text, and a copy of it on the clipboard. A clipboard that refuses (no display, no permission) is reported, not
+    * thrown.
+    */
+  def copySelection(): String =
+    val copied = selectedText.getOrElse("")
+    if copied.nonEmpty then
+      val _ = Try {
+        val content = javafx.scene.input.ClipboardContent()
+        content.putString(copied)
+        javafx.scene.input.Clipboard.getSystemClipboard().setContent(content)
+      }
+    copied
+
+  /** Turns cursor blinking off (or on) for good: the frame asks for blinking on every damage and this must still win, or a capture taken
+    * after any output would be a coin flip.
+    */
+  def setCursorBlinking(enabled: Boolean): Unit =
+    blinkOverride = Some(enabled)
+    blinking = enabled
+    canvas.setBlinking(enabled)
+
+  /** Focus, for a harness without a window manager: focused draws a filled cursor, unfocused a hollow one. */
+  def showFocus(focused: Boolean): Unit = canvas.showFocus(focused)
+
+  /** Asks the host to close this session, which is what closing a tab does. The host then reports the end through the usual push. */
+  def closeSession(): Unit = bridge.requestClose()
+
+  /** Releases what this view owns: the resize timer waits on the FX thread and the client runtime parks on a queue, and both would outlive
+    * a closed tab otherwise.
+    */
+  def dispose(): Unit =
+    resizeTimer.stop()
+    bridge.close()
+
+  /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
+    * what returns to the live grid; anything above it is history the client asks the host for.
+    */
+  def scrollBy(delta: Int): Unit =
+    model.foreach { current =>
+      val next = current.scrolledBy(delta)
+      model = Some(next)
+      // A selection is in viewport rows, so it stops meaning anything the moment they move: the terminal this replaces clears it too.
+      if next.scrollOffset != current.scrollOffset then selection = None
+      if next.missingHistory > 0 then bridge.requestHistory(from = 1, count = math.min(next.maxScroll, next.scrollOffset + next.rows))
+      updateScrollbar(next)
+      redraw()
+    }
+
+  def scrollTo(offset: Int): Unit =
+    model.foreach { current =>
+      if current.scrollOffset != offset then scrollBy(offset - current.scrollOffset)
+    }
+
+  // --- the runtime's side ---------------------------------------------------------------------------------------------------------
+
+  override def damage(id: SessionId, damage: Damage): Unit < Sync =
+    pushDamage(id, damage)
+    Sync.defer(())
+
+  override def ended(id: SessionId, ended: Ended): Unit < Sync =
+    pushEnded(id, ended)
+    Sync.defer(())
+
+  /** A push, from whichever thread the host is on; the view hops to the FX thread itself. A sink shared by several tabs calls this
+    * directly, because a session's damage goes only to the view that shows that session.
+    */
+  def pushDamage(id: SessionId, damage: Damage): Unit =
+    if id == session then
+      val _ = Platform.runLater(() => applyDamage(damage))
+
+  def pushEnded(id: SessionId, ended: Ended): Unit =
+    if id == session then
+      val _ = Platform.runLater(() => acceptEnd(ended))
+
+  override def sessionEnded(ended: Ended): Unit = acceptEnd(ended)
+
+  override def failed(message: String): Unit =
+    failure = Some(message)
+    java.lang.System.err.println(s"corvi renderer: $message")
+
+  override def attached(snapshot: Snapshot): Unit =
+    val next = ScreenModel.from(snapshot)
+    model = Some(next)
+    applyBackground(next.frame.theme)
+    updateScrollbar(next)
+    redraw()
+    scheduleResize()
+
+  override def history(rows: Vector[Row]): Unit =
+    model.foreach { current =>
+      val next = current.withHistory(rows)
+      model = Some(next)
+      updateScrollbar(next)
+      redraw()
+    }
+
+  /** The view's own background is the session's, so the pixels between the canvas and the window edge are the terminal's and not Modena's.
+    */
+  private def applyBackground(theme: TerminalTheme): Unit =
+    setBackground(Background(BackgroundFill(TerminalStyle.toColor(theme.background), CornerRadii.EMPTY, Insets.EMPTY)))
+
+  private def acceptEnd(ended: Ended): Unit =
+    end = Some(ended)
+    redraw()
+
+  private def applyDamage(damage: Damage): Unit =
+    model.foreach { current =>
+      val next = current.withFrame(current.frame.apply(damage))
+      model = Some(next)
+      updateScrollbar(next)
+      redraw()
+    }
+
+  // --- painting and layout ---------------------------------------------------------------------------------------------------------
+
+  private def redraw(): Unit =
+    model.foreach { current =>
+      // A new frame while the user is reading history keeps the viewport where it is and marks that output arrived.
+      if current.isLive != liveBefore then
+        liveBefore = current.isLive
+        updateScrollbar(current)
+      val shouldBlink = blinkOverride.getOrElse(current.frame.cursor.blinking)
+      if shouldBlink != blinking then
+        blinking = shouldBlink
+        canvas.setBlinking(shouldBlink)
+      canvas.show(current, selection)
+    }
+
+  private def updateScrollbar(model: ScreenModel): Unit =
+    scrollbar.setVisible(model.maxScroll > 0)
+    if model.maxScroll > 0 then
+      scrollbar.setMin(0)
+      scrollbar.setMax(model.maxScroll)
+      scrollbar.setVisibleAmount(math.max(1, model.rows * model.maxScroll / math.max(1, model.maxScroll + model.rows)))
+      scrollbar.setValue(model.maxScroll - model.scrollOffset)
+
+  /** The grid the view has room for, in cells. */
+  private def gridForSize(): (Int, Int) =
+    val layout = metrics.layout
+    (layout.colsFor(math.max(0, getWidth) - scrollbarWidth), layout.rowsFor(math.max(0, getHeight)))
+
+  /** Room kept for the scrollbar whether it is showing or not: a column that appears when history arrives would otherwise re-grid the
+    * terminal, and the host would be asked to resize for no reason the user can see.
+    */
+  private def scrollbarWidth: Double = 16
+
+  private def scheduleResize(): Unit =
+    if model.isDefined then
+      resizeTimer.setDuration(Duration.millis(if model.exists(_.frame.modes.alternateScreen) then 100 else 500))
+      resizeTimer.playFromStart()
+
+  /** A view that has not been laid out yet has no size, and asking the host to fit a grid to nothing would shrink its shell to a corner.
+    * Only a view with room for the canvas and the scrollbar asks for a grid.
+    */
+  private def requestGridForSize(): Unit =
+    model.foreach { current =>
+      if getWidth > scrollbarWidth && getHeight > 0 then
+        val (cols, rows) = gridForSize()
+        if cols != current.cols || rows != current.rows then bridge.requestResize(TermSize(cols = cols, rows = rows))
+    }
+
+  private def text(selection: Selection): String = model.map(_.text(selection)).getOrElse("")

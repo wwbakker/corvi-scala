@@ -145,3 +145,66 @@ object protocol extends ScalaModule:
       mvn"io.getkyo::kyo-jsonrpc:1.0.0-RC7"
     )
   }
+
+/** The thin renderer: a `Frame` to pixels, and nothing else. No terminal engine, no PTY, no host — a renderer that parsed bytes would be
+  * the thing this rewrite is replacing.
+  */
+object renderer extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def moduleDeps = Seq(contract, protocol)
+
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+      "msg=unused:e," +
+      "msg=(discarded.*value|pure.*statement):error," +
+      "msg=match may not be exhaustive:e",
+    "-language:strictEquality",
+    "-Xmax-inlines:128"
+  )
+
+  def mvnDeps = Task {
+    Seq(
+      mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library"
+    ) ++ Seq("base", "graphics", "controls")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }
+
+  /** ScalaFX's signatures mention the web and swing modules even where the app never calls them; the compiler needs their jars to read
+    * those signatures, and they stay off the runtime classpath.
+    */
+  def compileMvnDeps = Task {
+    Seq("web", "swing")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }
+
+  // The client's Kyo runtime lives on its own thread and parks in a blocking queue take, so it wants the same scheduler flags as the host.
+  def forkArgs = Seq(
+    "-Dkyo.scheduler.virtualizeWorkers=true",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED"
+  )
+
+/** The window, the snapshot harness and the probe: they start a real host, which is the dependency the `renderer` module must not have. */
+object rendererApp extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def moduleDeps = Seq(renderer, host)
+  def mainClass = Some("corvi.renderer.RendererApp")
+
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+      "msg=unused:e," +
+      "msg=(discarded.*value|pure.*statement):error," +
+      "msg=match may not be exhaustive:e",
+    "-language:strictEquality",
+    "-Xmax-inlines:128"
+  )
+
+  def forkArgs = Seq(
+    "-Dkyo.scheduler.virtualizeWorkers=true",
+    "--add-opens=java.base/java.lang=ALL-UNNAMED"
+  )

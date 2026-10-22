@@ -135,6 +135,53 @@ Still planned, not built: `Channel`/`Signal` between the reader and the push loo
 and `session.mouse`, a supervisor fiber per host with its own scope, and the ended-session reap
 policy.
 
+### Renderer limits
+
+- Font metrics are measured once, from `Text("M")`/`Text("Mg")`: no re-measure on a DPI or font change, and a half-pixel cell width is
+  rounded up, which makes the grid slightly wider than needed.
+- A `Wide` cell is one glyph drawn at the cell's left edge with its `Continuation` skipped: right for a monospace font whose CJK glyphs are
+  exactly two cells wide, wrong for one where they are not. No fallback font, per-script shaping or emoji presentation.
+- History is refetched wholesale (`from = 1`, `count = offset + rows`) rather than paged incrementally, copied text loses wrapping and has
+  no line join, and a resize while scrolled back does not reflow history.
+- Input is paste-and-edit only (see above); the clipboard write is unchecked because the probe machine is headless, and the probe asserts the
+  copied text rather than the system clipboard.
+- Focus and blink are overridden for captures; neither is asserted against a real window manager, and the blink has no phase relationship
+  with the host.
+
+## The renderer
+
+`renderer` turns a `Frame` into pixels and does nothing else: no terminal engine, no PTY, no host. Its module dependencies
+(`contract`, `protocol`, ScalaFX) are the proof, and the window, the snapshot harness and the probe live in `rendererApp` precisely because
+they start a real host.
+
+- **Pure core.** `Layout` (cell width/height and the pixel/cell mapping), `Selection` (a viewport range, ordered, with `contains`),
+  `ScreenModel` (the live grid or history above it, the scroll offset, the new-output mark, and the copy semantics: wide characters once,
+  continuations skipped, trailing blanks trimmed). No JavaFX type appears in any of them, so hit-testing, scrolling and copying are checked
+  without a toolkit.
+- **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, glyph (bold/italic via cached fonts, underline
+  as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model and the selection and calls the painter; blinking
+  is a timeline the view switches on when the frame's cursor blinks, and off for captures.
+- **Focus.** A window without the keyboard draws the cursor hollow — stroke only, no fill and no glyph redraw, so the cell keeps its own
+  colour: it says where the cursor would be, not that it has focus. Focus is a base flag the view sets from its own `focusedProperty`, with an
+  override a harness can drive, because a canvas never takes the keyboard itself.
+- **Deterministic captures.** Cursor blink and focus are overrides that frame state cannot undo: without that, a capture taken after any
+  output is a coin flip, because every damage would restart the blink timeline. The snapshot harness writes both states
+  (`out/corvi-renderer.png` and `out/corvi-renderer-unfocused.png`).
+- **The FX/Kyo boundary.** The client's Kyo runtime gets a thread of its own; the FX thread never enters an effect. FX hands commands (text,
+  resize, history) to a blocking queue that one fiber drains, and every result and every push comes back through `Platform.runLater`. That is
+  two hops in the whole renderer, and it is why `SessionEvents` can promise the FX thread and `FrameSink` is the only place that hops.
+- **Input.** Typed characters go out as `session.text`, and the editing keys — Backspace as `^?`, Enter as `\r`, Tab, Escape — are forwarded
+  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. **This build is
+  paste-and-edit only**: arrows, modified keys and mouse report nothing, because they need the host's mode-dependent encoding and a
+  `session.key`/`session.mouse` route; mouse drag selects locally and wheel scrolls.
+- **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
+  past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
+  shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
+  grows the offset by the same amount the history grew, so the reader stays where they were. Scrolling clears the selection: it is in
+  viewport coordinates, which stop meaning anything once the rows move (anchoring to absolute lines is what scrollback copying will need).
+- **Resize.** Debounced in the view (500 ms, 100 ms on the alternate screen) because the side that owns the window is the only one that knows
+  whether the user is still dragging its edge; the host applies what it is told.
+
 ## Modules (Mill)
 
 ```
@@ -142,7 +189,8 @@ contract   SessionId, SessionInfo, TermSize, TerminalTheme, Snapshot/Damage DTOs
 protocol   kyo-jsonrpc route names, schemas, typed errors, ClientRoutes, TerminalService/FrameSink/TerminalClient; depends on contract
 host       PTY + jeditermfx-core emulator, HostSession, HostSessions (registry + push loops), HostRoutes, in-memory wiring, probes;
            depends on contract and protocol
-renderer   thin JavaFX Canvas: Snapshot/Damage → cells, cursor, selection, scrollback; depends on contract and protocol
+renderer   thin JavaFX canvas: Frame → cells, cursor, selection, scrollback; depends on contract, protocol, ScalaFX
+rendererApp window, snapshot harness and probe: they start a real host, which the renderer must not
 ui         shell/tabs/sidebar/state/chords; depends on contract (+ renderer's view factory)
 app        composition root: ensure host, connect, build the UI, launch JavaFX
 ```

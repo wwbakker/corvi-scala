@@ -9,8 +9,9 @@ import kyo.Frame
   * Failures are values: the host's typed route errors come back as `TerminalError` (rebuilt from the code and the error's `data`), and
   * `Closed` says the transport went away.
   *
-  * `text` is paste-only for now. Key and mouse events belong here too, but they need the host's encoders and the renderer's event model, so
-  * they arrive with the renderer rather than as a rename later.
+  * `text` is paste-only for now: it puts the bytes on the shell's input as they are, so Enter has to be sent as `\r` (which is what a
+  * terminal sends) and nothing is translated. Key and mouse events belong here too, but they need the host's encoders and the terminal
+  * modes, so they arrive with the renderer's key handling rather than as a rename later.
   */
 private[corvi] trait TerminalService:
   def list(using Frame): Seq[SessionInfo] < (Async & Abort[TerminalError | Closed])
