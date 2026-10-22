@@ -16,7 +16,7 @@ import scala.concurrent.duration.*
   * host, the same shells and the same screens have to be there. Then a second client joins while the first is live, a bad token is refused,
   * a stale socket is replaced, and `host.stop` takes the daemon and both shells with it.
   *
-  * ./mill -i host.runMain corvi.host.HostDaemonProbe
+  * ./mill -i host.test.runMain corvi.host.HostDaemonProbe
   */
 object HostDaemonProbe:
   private val waitTimeout: scala.concurrent.duration.Duration = 30.seconds
@@ -38,6 +38,28 @@ object HostDaemonProbe:
         "a live daemon answers the client's liveness check",
         SocketWire.answersUnsafe(socket, scala.concurrent.duration.Duration(500, "ms")),
         s"socket $socket"
+      )
+
+      // The daemon's pushes: a client that only attached must be handed damage as the shell writes, without asking for it again. Nothing
+      // in this probe used to look at a client's sink, which is how a client that never heard a push could pass every check above.
+      val pushed = runKyo {
+        Scope.run {
+          for
+            sink <- Sync.defer(RecordingSink())
+            client <- connect(paths, sink)
+            _ <- client.hello(token)
+            created <- client.create(cwd, TermSize(80, 24))
+            _ <- client.attach(created.id)
+            _ <- client.text(created.id, "printf 'PUSH_%s\n' OK\r")
+            seen <- Sync.defer(sink.awaitDamage(created.id, scala.concurrent.duration.Duration(15, "s")))
+            _ <- client.close(created.id)
+          yield seen
+        }
+      }
+      reporter.report(
+        "a client that attached is pushed damage without asking",
+        pushed.contains(true),
+        s"damage ${pushed.map(seen => if seen then "arrived" else "missing").getOrElse("no phase")}"
       )
 
       // A connection that has not said hello is refused, and a wrong token is refused in a way a client can match.
@@ -299,6 +321,11 @@ object HostDaemonProbe:
     }
 
   private def connect(paths: HostPaths)(using Frame): TerminalService < (Async & Scope & Abort[TerminalError | Closed]) =
+    connect(paths, Ignored)
+
+  private def connect(paths: HostPaths, sink: FrameSink)(using
+      Frame
+  ): TerminalService < (Async & Scope & Abort[TerminalError | Closed]) =
     for
       closed <- Latch.init(1)
       opened <- Abort.run[Throwable](SocketWire.connect(paths.socket, closed))
@@ -307,12 +334,30 @@ object HostDaemonProbe:
         case Result.Failure(error) => Abort.fail(HostUnavailable(s"connect failed: $error"))
         case Result.Panic(error)   => Abort.fail(HostUnavailable(s"connect failed: $error"))
       transport <- JsonRpcTransport.fromWire(wire, JsonRpcFramer.contentLength)
-      handler <- JsonRpcHandler.init(transport, ClientRoutes.routes(Ignored)*)
+      handler <- JsonRpcHandler.init(transport, ClientRoutes.routes(sink)*)
     yield TerminalClient(handler)
 
   private object Ignored extends FrameSink:
     def damage(id: SessionId, damage: Damage): Unit < Sync = Sync.defer(())
     def ended(id: SessionId, ended: Ended): Unit < Sync = Sync.defer(())
+
+  /** Records which sessions it was pushed damage for, so a check can wait for the first one. A real sink would apply it to a frame. */
+  private final class RecordingSink extends FrameSink:
+    private val seen = new java.util.concurrent.ConcurrentHashMap[SessionId, java.util.concurrent.atomic.AtomicBoolean]()
+    private val first = new java.util.concurrent.CountDownLatch(1)
+
+    def damage(id: SessionId, damage: Damage): Unit < Sync =
+      Sync.defer {
+        if !damage.isEmpty then
+          val _ = seen.computeIfAbsent(id, _ => new java.util.concurrent.atomic.AtomicBoolean(false)).set(true)
+          first.countDown()
+      }
+
+    def ended(id: SessionId, ended: Ended): Unit < Sync = Sync.defer(())
+
+    def awaitDamage(id: SessionId, timeout: scala.concurrent.duration.Duration): Boolean =
+      val _ = first.await(timeout.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
+      Option(seen.get(id)).exists(_.get())
 
   /** Runs a phase on a runtime of its own: a UI restart is a new runtime and a new connection, with nothing carried across. */
   private def runKyo[A](v: A < (Async & Scope & Abort[Any]))(using Frame): Option[A] =

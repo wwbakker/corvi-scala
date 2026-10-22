@@ -216,9 +216,11 @@ through a fake factory and know nothing about where pixels or bytes come from.
   not a convention but a value: `app.Client(service, sink)` is made in the one place the client is made (`Harness.start`,
   `HostConnection.ensure`), `RendererViewFactory` takes the whole `Client`, and `dispose` unplugs the view so a closed tab stops being
   iterated. Choosing a second sink is exactly what once left every tab parked on its seeded frame.
-- **Create and close are asynchronous.** They are offered to the client's own runtime (`Client.Calls`, one fiber draining a blocking queue,
-  the same shape as a session's command loop) and report back through `Platform.runLater`. Nothing on the FX thread waits for the host, so a
-  wedged daemon freezes neither the window nor the strip; a tab appears when the host has answered, and a refusal is `onCreated(None)`.
+- **The client has one runtime.** `Client` is a queue served by a single fiber on the runtime that owns the connection and its reader:
+  creating, attaching, typing, resizing, history and closing are all commands, and every answer comes back through `Platform.runLater`. A
+  view (a `SessionCalls`) submits and returns; it never starts a runtime of its own, and nothing on the FX thread waits for the host. The
+  failure this replaced was intermittent and real: a client used from several Kyo runtimes received its pushes on the socket and then never
+  dispatched them.
 - **Render policy.** The state is one immutable `ShellState`; a transition that returns the same value does not repaint at all (output in the
   window you are looking at changes nothing). A render during a tab drag is deferred (`TabDragState`) and flushed when the gesture ends,
   because it would otherwise update the nodes the drag is running on. The strip keeps one tab node per window and **updates it in place** —
@@ -285,9 +287,11 @@ protocol   kyo-jsonrpc route names, schemas, typed errors, ClientRoutes, Termina
 host       PTY + jeditermfx-core emulator, HostSession, HostSessions (registry + push loops), HostRoutes, in-memory wiring, probes;
            depends on contract and protocol
 renderer   thin JavaFX canvas: Frame → cells, cursor, selection, scrollback; depends on contract, protocol, ScalaFX
-app        the composition root: `ShellApp` (the window), host connection, client, view factory, and the probes, which
-           start a real host — the dependency the renderer must not have
+app        the composition root: `ShellApp`/`AppWindow` (the one window), host connection, client, view factory;
+           depends on renderer, host and ui
 ui         shell/tabs/sidebar/state/chords; depends on contract only, over the TerminalView seam
+*.test     every probe, harness and test (JUnit/TestFX for the pure core and the window, runMain probes for the rest):
+           production modules contain no test code, and no production module depends on JUnit or TestFX
 ```
 
 The UI is testable with a fake `TerminalViewFactory`; the host and renderer are testable headlessly.

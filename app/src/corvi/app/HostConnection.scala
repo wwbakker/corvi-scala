@@ -2,7 +2,7 @@ package corvi.app
 
 import corvi.protocol.*
 import java.io.File
-import java.nio.file.{Path, Paths}
+import java.nio.file.{Files, Path, Paths}
 import kyo.*
 import kyo.Frame
 import scala.concurrent.duration.*
@@ -64,7 +64,12 @@ object HostConnection:
       start(paths)
       awaitSocket(paths.socket)
 
-  /** Whether something is listening: a non-blocking connect that completes is a daemon, one that fails is a socket nobody owns. */
+  /** Whether something is listening: a non-blocking connect that completes is a daemon, one that fails is a socket nobody owns.
+    *
+    * The connect is accepted by the daemon as a short-lived connection: it gets a client id and is closed again, but it never says hello,
+    * so it never binds a handler or a session baseline. `awaitSocket` polls the socket file instead and asks this once, so starting a
+    * daemon costs one probe connection rather than one per poll.
+    */
   private def answers(socket: Path): Boolean = SocketWire.answersUnsafe(socket, pingTimeout)
 
   private def start(paths: HostPaths): Unit =
@@ -90,7 +95,14 @@ object HostConnection:
     val process = builder.start()
     java.lang.System.err.println(s"corvi ui: started the host as pid ${process.pid()}, logging to $log")
 
+  /** Waits for the daemon to answer, but only knocks once its socket file exists: a probe before the file is there is a refused connect,
+    * and a probe after it works is accepted as a short-lived connection (a client id that never says hello, so it never binds a session).
+    * Polling the file first keeps the accepted probes to the handful around the daemon's bind rather than one every 50 ms.
+    */
   private def awaitSocket(socket: Path): Unit =
     val deadline = java.lang.System.nanoTime() + startTimeout.toNanos
-    while !answers(socket) && java.lang.System.nanoTime() < deadline do Thread.sleep(50)
-    if !answers(socket) then throw new IllegalStateException(s"the host did not bind $socket within $startTimeout")
+    var bound = false
+    while !bound && java.lang.System.nanoTime() < deadline do
+      bound = Files.exists(socket) && answers(socket)
+      if !bound then Thread.sleep(20)
+    if !bound then throw new IllegalStateException(s"the host did not bind $socket within $startTimeout")

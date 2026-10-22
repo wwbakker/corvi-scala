@@ -40,6 +40,8 @@ object Harness:
           for
             host <- TerminalPeers.host(pushInterval, command)
             wired <- host.client(sink)
+            client = Client(wired.client, sink)
+            _ <- Fiber.init(client.serve)
             created <- wired.client.create(java.lang.System.getProperty("user.dir"), TermSize(cols, rows))
             // A second session from the same scope: the two-view check needs one that no short-lived runtime created.
             second <- wired.client.create(java.lang.System.getProperty("user.dir"), TermSize(60, 16))
@@ -47,7 +49,7 @@ object Harness:
               outcome.set(
                 Right(
                   Running(
-                    client = Client(wired.client, sink),
+                    client = client,
                     session = created.id,
                     extras = Vector(second.id),
                     host = host,

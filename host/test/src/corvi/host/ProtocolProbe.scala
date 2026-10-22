@@ -11,7 +11,7 @@ import scala.concurrent.duration.*
 /** The protocol's regression suite: real shells, driven through the in-memory `kyo-jsonrpc` peers, with each client holding a screen it
   * only ever heard about from pushed deltas.
   *
-  * ./mill -i host.runMain corvi.host.ProtocolProbe
+  * ./mill -i host.test.runMain corvi.host.ProtocolProbe
   */
 object ProtocolProbe:
   /** A push tick every 200 ms: slow enough that a delta covers several updates, fast enough not to slow the checks down. */

@@ -20,10 +20,12 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
   private val defaultGrid: TermSize = TermSize(cols = 100, rows = 28)
 
   def open(info: SessionInfo, onActivity: () => Unit, onEnded: Ended => Unit): ShellView[JfxNode] =
-    val inner = TerminalView(client.service, info.id, metrics)
+    val inner = TerminalView(client, info.id, metrics)
+    // Plugged before it asks for its snapshot: the host's first damage can otherwise arrive while the view is still absent from the sink.
     client.sink.plug(inner)
     inner.onOutput(onActivity)
     inner.onSessionEnded(onEnded)
+    inner.attach()
     new ShellView[JfxNode]:
       def node: JfxNode = inner
       def focus(): Unit = inner.requestFocus()

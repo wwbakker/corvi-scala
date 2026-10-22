@@ -218,3 +218,15 @@
     -fx-text-fill: -fx-corvi-muted;
     -fx-font-size: 20px;
 }
+
+/* The window before the shell exists, and the one place a host failure is shown: the well's colour so the first frame is not a black
+   screen, and one muted line. */
+
+.status-view {
+    -fx-background-color: -fx-corvi-well;
+}
+
+.status-view .label {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 13px;
+}

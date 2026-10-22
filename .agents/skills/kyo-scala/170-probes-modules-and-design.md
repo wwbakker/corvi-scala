@@ -20,8 +20,10 @@ host        PTYs + the VT emulator (jeditermfx-core) + HostSession/HostSessions,
 renderer    Frame -> pixels. JavaFX canvas, painter, layout, the per-session client bridge. Depends on contract and
             protocol, never on host.
 ui          sidebar, tab strip, Overview, ShellState/Chords. Depends on contract only, over the TerminalView seam.
-app         composition root: HostConnection, Client, the view factory, ShellApp (the window) and the probes. Depends on
-            renderer, host and ui.
+app         composition root: HostConnection, Client, the view factory, ShellApp/AppWindow. Depends on renderer, host and ui.
+*.test      every probe, harness and test: JUnit 5 for the pure core (`ui.test`, `renderer.test`), TestFX for the window
+            (`app.test`), and `runMain` probes where a real PTY/daemon/scene is the point (`host.test`, `app.test`). No
+            production module contains test code, and none depends on JUnit or TestFX.
 ```
 
 The dependency arrows are the architecture. Two are load-bearing:
@@ -90,6 +92,9 @@ which drive the real thing:
   deadline; a slow machine makes a check slower, not flakier.
 - **They read the model, not the pixels, when possible** — and the pixels when that is the claim (a screenshot). Colours
   are read after `applyCss()`, because CSS lands on the next pulse.
+- **A click is a press, a release and then the click.** A test that fires only `MOUSE_CLICKED` misses every state machine a press
+  starts: the tab strip's drag state was left `Pressed` by a plain click, so the next render was deferred forever and the
+  strip stopped updating — invisible to the probe until its clicks became real ones. Drive the sequence the platform sends.
 - **They assert the absence of leaks**: descriptor counts before and after connections (`lsof`), no orphaned daemons,
   no view left in a sink after its tab closes, no `TerminalEmulator-*` thread after a session ends.
 - **They clean up**: stop the harness host, close the stage, `System.exit`.
@@ -98,7 +103,7 @@ The full set, and the command for each:
 
 | probe | what it covers |
 | --- | --- |
-| `corvi.app.CoreProbe` | the pure core, no toolkit: `ShellState` transitions, `ScreenModel` viewport/paging/copy, `Layout`/`Selection`, the `Chords` matrix |
+| `ui.test`, `renderer.test` | the pure core as JUnit: `ShellState` transitions, the chord matrix, `ScreenModel` viewport/paging/copy, `Layout`/`Selection` |
 | `corvi.host.HostProbe` | PTY, VT emulation, snapshot/damage, history, resize, session teardown |
 | `corvi.host.ProtocolProbe` | the routes over the in-memory transport: typed errors, auth, pushes, reconnects |
 | `corvi.host.HostDaemonProbe` | the socket daemon: single instance, token, stop, descriptor leaks, liveness |

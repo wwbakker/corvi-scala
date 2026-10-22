@@ -27,7 +27,7 @@ import scala.concurrent.duration.*
 /** The shell's regression suite: a real host, the real renderer views, and the real JavaFX events a person would send — clicks on tabs, the
   * chords, a right-click and its menu, a drag, and a shell exiting under a background tab.
   *
-  * ./mill -i app.runMain corvi.app.UiProbe
+  * ./mill -i app.test.runMain corvi.app.UiProbe
   */
 object UiProbe:
   private val waitTimeout: scala.concurrent.duration.Duration = 30.seconds
@@ -105,6 +105,11 @@ object UiProbe:
       val first = onFx(shell.current.windows.head.id)
       reporter.report("clicking a tab selects it", onFx(shell.current.isSelected(first)), "")
       reporter.report("and moves the keyboard into it", onFx(focusHolds(sink, shell, scene, first)), focusDetail(scene))
+      reporter.report(
+        "and the strip and the well show it",
+        onFx(windowTab(shell, 0).getStyleClass.contains("current")) && onFx(isVisibleView(sink, shell, first)),
+        s"current ${onFx(windowTab(shell, 0).getStyleClass.toArray.toVector)}"
+      )
       onFx(press(scene, KeyCode.B, control = true, shift = false, alt = false, meta = false))
       onFx(press(scene, KeyCode.DIGIT1, control = false, shift = false, alt = false, meta = false))
       val secondSelected = poll(scala.concurrent.duration.Duration(5, "s"))(
@@ -323,7 +328,12 @@ object UiProbe:
   private def fire(node: JfxNode, event: Event): Unit =
     val _ = Event.fireEvent(node, event)
 
+  /** A real click is a press, a release and then the platform's click event: the press starts the tab's drag state, and the release has to
+    * clear it again (a press left behind defers every render after it, which is the bug this sequence caught).
+    */
   private def click(node: JfxNode): Unit =
+    fire(node, mouseEvent(MouseEvent.MOUSE_PRESSED, MouseButton.PRIMARY, Some(node)))
+    fire(node, mouseEvent(MouseEvent.MOUSE_RELEASED, MouseButton.PRIMARY, Some(node)))
     fire(node, mouseEvent(MouseEvent.MOUSE_CLICKED, MouseButton.PRIMARY, Some(node)))
 
   private def rightClick(node: JfxNode): Unit =
@@ -389,6 +399,11 @@ object UiProbe:
     val view = onFx(sink.views.find(_.session == session))
     val owner = Option(onFx(scene.getFocusOwner))
     view.exists(target => owner.exists(node => isInside(node, target)))
+
+  /** Whether the window's own view is on screen: the shell shows one view at a time by making the others invisible. */
+  private def isVisibleView(sink: ViewSink, shell: ShellView, id: WindowId): Boolean =
+    val session = sessionOf(shell, id)
+    sink.views.find(_.session == session).exists(_.isVisible)
 
   private def focusDetail(scene: Scene): String =
     val owner = Option(onFx(scene.getFocusOwner))

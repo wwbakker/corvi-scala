@@ -15,7 +15,7 @@ import scala.concurrent.duration.*
   * The checks are split by scenario rather than written as one for-comprehension: a single chain of ninety binds over Kyo's inline-heavy
   * `A < S` runs the compiler out of recursion, and a scenario that fails is easier to find in a method than in a list.
   *
-  * ./mill -i host.runMain corvi.host.HostProbe
+  * ./mill -i host.test.runMain corvi.host.HostProbe
   */
 object HostProbe:
   private val waitTimeout: scala.concurrent.duration.Duration = 20.seconds

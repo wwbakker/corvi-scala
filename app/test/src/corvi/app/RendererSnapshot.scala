@@ -14,7 +14,7 @@ import scala.concurrent.duration.*
 
 /** Renders the real terminal view into `out/corvi-renderer.png` and exits.
   *
-  * ./mill -i app.runMain corvi.app.RendererSnapshot
+  * ./mill -i app.test.runMain corvi.app.RendererSnapshot
   *
   * This machine has no Screen Recording permission, so a harness that renders the scene is how the UI is looked at. The capture waits for
   * the screen to stop changing: the shell redraws its prompt once the PTY has the real size, and a capture taken before that depends on
@@ -32,8 +32,9 @@ object RendererSnapshot extends scalafx.application.JFXApp3:
   override def start(): Unit =
     val metrics = TerminalMetrics.monospaced(13)
     val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
-    val view = TerminalView(running.client.service, running.session, metrics)
+    val view = TerminalView(running.client, running.session, metrics)
     running.client.sink.plug(view)
+    view.attach()
     view.setPrefSize(metrics.layout.width(cols), metrics.layout.height(rows))
 
     val scene = Scene(view, metrics.layout.width(cols) + 16, metrics.layout.height(rows))

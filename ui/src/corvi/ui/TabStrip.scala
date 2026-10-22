@@ -202,7 +202,10 @@ private[corvi] final class TabStrip(drag: TabDragState, intent: WindowIntent => 
               drag.update(TabDrag.Dropped(from))
               intent(WindowIntent.MoveWindow(from, to))
             case None => drag.update(TabDrag.Idle)
-        case _ => ()
+        // A press that never became a carry is a click. Clearing it here is what lets the click that follows select, and what
+        // lets the next render paint: a render during a gesture is deferred, and a press left behind would defer every one after it.
+        case TabDrag.Pressed(_) => drag.update(TabDrag.Idle)
+        case _                  => ()
     )
     tab.onMouseClicked = _ =>
       drag.drag match

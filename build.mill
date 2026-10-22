@@ -25,6 +25,39 @@ val noTransitiveOpenJfx: String = "exclude=org.openjfx:*"
   */
 val noTransitiveScala3Library: String = "exclude=org.scala-lang:scala3-library_3"
 
+/** The warning-as-error flags every Kyo module in this project compiles with (see the inline copies on the modules below).
+  */
+val strictScalacOptions: Seq[String] = Seq(
+  "-Wunused:all",
+  "-Wvalue-discard",
+  "-Wnonunit-statement",
+  // `-Wconf` filters are one option, first match wins: Kyo's macro expansion carries `@nowarn` annotations that no
+  // longer suppress anything, and `-Wunused:all` reports each of them. They are generated code, not ours.
+  "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+    "msg=unused:e," +
+    "msg=(discarded.*value|pure.*statement):error," +
+    "msg=match may not be exhaustive:e",
+  "-language:strictEquality",
+  "-Xmax-inlines:128"
+)
+
+/** The flags for a test module that starts JavaFX: software rendering, so a window in a test does not need a GPU context, and Kyo's
+  * blocking-read support. The suite dispatches JavaFX events itself instead of using TestFX's glass robot, so the robot/headless switches
+  * (and the `javafx.graphics` internals only a robot reaches) are not needed — and JavaFX is on the classpath here, so a module-valued
+  * `--add-opens` would only print "Unknown module".
+  */
+val fxTestForkArgs: Seq[String] = Seq(
+  "-Dprism.order=sw",
+  "-Dkyo.scheduler.virtualizeWorkers=true",
+  "--add-opens=java.base/java.lang=ALL-UNNAMED"
+)
+
+/** JUnit 5.11.3, deliberately not the newest 5.x: Mill's `jupiter-interface` 0.13.3 is built against that platform, and a newer
+  * `junit-platform-engine` on the test classpath breaks Mill's in-process test discovery ("OutputDirectoryCreator not available, probably
+  * due to unaligned versions"). Bump the interface and this together.
+  */
+val junitTestDeps: Seq[Dep] = Seq(mvn"org.junit.jupiter:junit-jupiter:5.11.3")
+
 /** The DTOs the host and the future UI share. Pure data: no JavaFX, no Kyo, no terminal engine. */
 object contract extends ScalaModule:
   def scalaVersion = "3.10.0"
@@ -44,7 +77,7 @@ object contract extends ScalaModule:
 object host extends ScalaModule:
   def scalaVersion = "3.10.0"
   def moduleDeps = Seq(contract, protocol)
-  def mainClass = Some("corvi.host.HostProbe")
+  def mainClass = Some("corvi.host.HostMain")
 
   // Kyo requires these: it returns values that must not be silently discarded, and it relies on
   // strict equality. `kyo-jsonrpc` arrives through `protocol`; this module answers the routes.
@@ -80,6 +113,20 @@ object host extends ScalaModule:
       mvn"org.jetbrains.pty4j:pty4j:0.14.0"
     )
   }
+
+  /** The host's probes: real PTYs, the in-memory peers and the socket daemon. Test code, so it lives here and the production module stays
+    * probe-free.
+    */
+  object test extends ScalaTests, TestModule.Junit5:
+    def scalacOptions = strictScalacOptions
+    def mvnDeps = Task {
+      junitTestDeps
+    }
+    // The reader fiber parks in a blocking PTY read, and the probe's daemon is started with the host's flags.
+    def forkArgs = Seq(
+      "-Dkyo.scheduler.virtualizeWorkers=true",
+      "--add-opens=java.base/java.lang=ALL-UNNAMED"
+    )
 
 /** The wire and the client half of it: typed `kyo-jsonrpc` routes, schemas, typed errors, and `TerminalService` over a peer handler. It
   * depends on `contract` and nothing else of ours, so the renderer and the UI can take it without pulling the terminal engine in.
@@ -149,6 +196,14 @@ object renderer extends ScalaModule:
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
   )
 
+  /** The renderer's pure core (layout, selection, the screen model) under JUnit. No toolkit, no host: values in, values out.
+    */
+  object test extends ScalaTests, TestModule.Junit5:
+    def scalacOptions = strictScalacOptions
+    def mvnDeps = Task {
+      junitTestDeps
+    }
+
 /** The Corvi window: the composition root, which ensures the host, lists and attaches, and builds the shell over the real client. The
   * probes live here too because they start a real host — the dependency the `renderer` module must not have.
   *
@@ -183,6 +238,26 @@ object app extends ScalaModule:
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
   )
 
+  /** The window's tests: the TestFX suite that drives the real daemon-backed window, plus the probes and harnesses that used to live in
+    * this module. TestFX and JUnit appear here and nowhere else — the `app` module itself has no test dependency.
+    */
+  object test extends ScalaTests, TestModule.Junit5:
+    def scalacOptions = strictScalacOptions
+    def mvnDeps = Task {
+      junitTestDeps ++ Seq(
+        mvn"org.testfx:testfx-core:4.0.18",
+        mvn"org.testfx:testfx-junit5:4.0.18"
+      )
+    }
+    def forkArgs = fxTestForkArgs
+    /** A socket of this run's own. It lives in `/tmp` because a Unix domain socket path is limited to ~104 bytes on macOS, and the
+      * build's own test directory is longer than that; the name is derived from the task so two checkouts do not share a socket.
+      */
+    def forkEnv = Task {
+      val root = os.Path("/tmp") / s"corvi-ui-test-${java.lang.Integer.toHexString(Task.dest.toString.hashCode)}"
+      Map("CORVI_HOST_SOCKET" -> (root / "host.sock").toString)
+    }
+
 /** The Corvi shell: sidebar, tab strip, Overview and the terminal area, over plain interfaces from `contract`. It depends on nothing of ours
   * but `contract`, so it can be run against a fake view factory and knows nothing about Kyo, the host or the renderer internals.
   */
@@ -215,3 +290,11 @@ object ui extends ScalaModule:
     Seq("web", "swing")
       .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
   }
+
+  /** The shell's state machine and chords under JUnit: the pure half of `ui`, checked without a toolkit.
+    */
+  object test extends ScalaTests, TestModule.Junit5:
+    def scalacOptions = strictScalacOptions
+    def mvnDeps = Task {
+      junitTestDeps
+    }

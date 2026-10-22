@@ -32,7 +32,7 @@ object TerminalView:
     */
   val scrollbarWidth: Double = 16
 
-final class TerminalView(service: TerminalService, val session: SessionId, metrics: TerminalMetrics)
+final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics)
     extends BorderPane
     with FrameSink
     with SessionEvents:
@@ -41,7 +41,6 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
   private val canvas: TerminalCanvas = TerminalCanvas(metrics, style)
   private val scrollbar: ScrollBar = new ScrollBar()
   scrollbar.setOrientation(Orientation.VERTICAL)
-  private val bridge: TerminalSession = TerminalSession(service, session, this)
 
   private var model: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
@@ -52,6 +51,11 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
   private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
+
+  /** Damage that arrived before the snapshot did: the host's first push can beat its own attach reply across two fibers, and the delta is
+    * computed against the snapshot, so it is exactly what this view needs once seeded rather than something to drop.
+    */
+  private var pendingDamage: Vector[Damage] = Vector.empty
 
   /** How far one wheel notch moves the view. */
   private val stepsPerWheel: Int = 3
@@ -78,17 +82,17 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
     // the host's mode-dependent key encoding, and until it exists this build is paste-and-edit only.
     val _ = setOnKeyTyped { event =>
       val typed = event.getCharacter
-      if typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then bridge.requestText(typed)
+      if typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then calls.text(session, typed)
     }
     val _ = setOnKeyPressed { event =>
       if event.isShortcutDown && event.getCode == KeyCode.C then
         val _ = copySelection()
       else
         event.getCode match
-          case KeyCode.BACK_SPACE => bridge.requestText("\u007f")
-          case KeyCode.ENTER      => bridge.requestText("\r")
-          case KeyCode.TAB        => bridge.requestText("\t")
-          case KeyCode.ESCAPE     => bridge.requestText("\u001b")
+          case KeyCode.BACK_SPACE => calls.text(session, "\u007f")
+          case KeyCode.ENTER      => calls.text(session, "\r")
+          case KeyCode.TAB        => calls.text(session, "\t")
+          case KeyCode.ESCAPE     => calls.text(session, "\u001b")
           case _                  => ()
     }
     val _ = setOnMousePressed(event =>
@@ -103,7 +107,11 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
     )
     val _ = setOnScroll((event: ScrollEvent) => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel))
     resizeTimer.setOnFinished(_ => requestGridForSize())
-    bridge.start()
+
+  /** Joins the host's session: ask for the snapshot that seeds this view. Called after the sink has plugged it, so a delta the host sends
+    * before the snapshot cannot slip past both.
+    */
+  def attach(): Unit = calls.attach(session, this)
 
   def screen: Option[ScreenModel] = model
 
@@ -126,7 +134,7 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
   /** Types without a keyboard, which is how a harness drives a session. Real input arrives through the key handler below and takes the same
     * path.
     */
-  def typeText(text: String): Unit = bridge.requestText(text)
+  def typeText(text: String): Unit = calls.text(session, text)
 
   def select(from: CellPosition, to: CellPosition): Unit =
     selection = Some(Selection(from, to))
@@ -161,14 +169,12 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
   def showFocus(focused: Boolean): Unit = canvas.showFocus(focused)
 
   /** Asks the host to close this session, which is what closing a tab does. The host then reports the end through the usual push. */
-  def closeSession(): Unit = bridge.requestClose()
+  def closeSession(): Unit = calls.close(session)
 
   /** Releases what this view owns: the resize timer waits on the FX thread and the client runtime parks on a queue, and both would outlive
     * a closed tab otherwise.
     */
-  def dispose(): Unit =
-    resizeTimer.stop()
-    bridge.close()
+  def dispose(): Unit = resizeTimer.stop()
 
   /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
     * what returns to the live grid; anything above it is history the client asks the host for.
@@ -179,7 +185,7 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
       model = Some(next)
       // A selection is in viewport rows, so it stops meaning anything the moment they move: the terminal this replaces clears it too.
       if next.scrollOffset != current.scrollOffset then selection = None
-      if next.missingHistory > 0 then bridge.requestHistory(from = 1, count = math.min(next.maxScroll, next.scrollOffset + next.rows))
+      if next.missingHistory > 0 then calls.history(session, from = 1, count = math.min(next.maxScroll, next.scrollOffset + next.rows))
       updateScrollbar(next)
       redraw()
     }
@@ -221,6 +227,9 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
     model = Some(next)
     applyBackground(next.frame.theme)
     updateScrollbar(next)
+    val pending = pendingDamage
+    pendingDamage = Vector.empty
+    pending.foreach(applyToModel)
     redraw()
     scheduleResize()
 
@@ -244,11 +253,15 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
 
   private def applyDamage(damage: Damage): Unit =
     if !damage.isEmpty then activityListeners.foreach(listener => listener())
+    model match
+      case Some(_) => applyToModel(damage); redraw()
+      case None    => pendingDamage = pendingDamage :+ damage
+
+  private def applyToModel(damage: Damage): Unit =
     model.foreach { current =>
       val next = current.withFrame(current.frame.apply(damage))
       model = Some(next)
       updateScrollbar(next)
-      redraw()
     }
 
   // --- painting and layout ---------------------------------------------------------------------------------------------------------
@@ -291,7 +304,7 @@ final class TerminalView(service: TerminalService, val session: SessionId, metri
     model.foreach { current =>
       if getWidth > TerminalView.scrollbarWidth && getHeight > 0 then
         val (cols, rows) = gridForSize()
-        if cols != current.cols || rows != current.rows then bridge.requestResize(TermSize(cols = cols, rows = rows))
+        if cols != current.cols || rows != current.rows then calls.resize(session, TermSize(cols = cols, rows = rows))
     }
 
   private def text(selection: Selection): String = model.map(_.text(selection)).getOrElse("")

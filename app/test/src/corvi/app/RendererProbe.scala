@@ -19,7 +19,7 @@ import scala.concurrent.duration.*
 /** The renderer's regression suite: a real host session painted by the real canvas, checked through the frame it was given and the pixels
   * it produced.
   *
-  * ./mill -i app.runMain corvi.app.RendererProbe
+  * ./mill -i app.test.runMain corvi.app.RendererProbe
   *
   * The checks run on a thread of their own, never on the FX thread: the pushes the checks wait for arrive *through* the FX thread, so a
   * check that blocked it would wait for itself. `onFx` is the only way in.
@@ -52,8 +52,9 @@ object RendererProbe:
     var stage: Option[Stage] = None
     try
       val metrics = onFx(TerminalMetrics.monospaced(fontSize))
-      val view = onFx(TerminalPane(running.client.service, running.session, metrics))
+      val view = onFx(TerminalPane(running.client, running.session, metrics))
       running.client.sink.plug(view)
+      view.attach()
       val scene = onFx {
         view.setPrefSize(metrics.layout.width(cols), metrics.layout.height(rows))
         val created = Scene(view, metrics.layout.width(cols), metrics.layout.height(rows))
@@ -73,8 +74,9 @@ object RendererProbe:
       val layout = metrics.layout
       // The second view lives in a scene of its own, so it lays out and asks for a grid like a real one would.
       val second: Option[TerminalPane] = running.extras.headOption.map { id =>
-        val created = onFx(TerminalPane(running.client.service, id, metrics))
+        val created = onFx(TerminalPane(running.client, id, metrics))
         running.client.sink.plug(created)
+        created.attach()
         val _ = onFx(new Scene(new javafx.scene.layout.StackPane(created), metrics.layout.width(60), metrics.layout.height(16)))
         created
       }

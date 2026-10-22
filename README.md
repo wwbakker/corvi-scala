@@ -32,13 +32,18 @@ exactly as the host holds it. (If the *host* dies, the shells are gone — see t
 | --- | --- | --- |
 | `contract` | DTOs and the pure `Frame` consumer: `SessionId`, `SessionInfo`, `Snapshot`/`Damage`, `TerminalView`/`TerminalViewFactory` | — |
 | `protocol` | `kyo-jsonrpc` routes, schemas, typed errors, the client half (`TerminalService`), the Unix-socket byte seam | contract |
-| `host` | PTY + VT emulator, `HostSession`/`HostSessions`, the daemon's routes, the daemon itself, and its probes | contract, protocol |
-| `renderer` | `Frame` → pixels: layout, painter, canvas, selection, scrollback, the per-session client bridge | contract, protocol, ScalaFX |
+| `host` | PTY + VT emulator, `HostSession`/`HostSessions`, the daemon's routes, the daemon itself | contract, protocol |
+| `renderer` | `Frame` → pixels: layout, painter, canvas, selection, scrollback, the session-call seam | contract, protocol, ScalaFX |
 | `ui` | sidebar, tab strip, Overview, `ShellState`, chords — written against the `contract` seam only | contract |
-| `app` | the composition root: host connection, `Client`, the view factory, `ShellApp`, and the probes | renderer, host, ui |
+| `app` | the composition root: host connection, `Client`, the view factory, `ShellApp` | renderer, host, ui |
+| `host.test`, `renderer.test`, `ui.test`, `app.test` | every probe, harness and test. **Production modules contain no test code** | their module |
 
 `ui` is deliberately independent of `renderer` (it can be driven by a fake factory), and `renderer` cannot see the host
 (a renderer that linked the VT engine could parse bytes "just this once"). Whatever needs both lives in `app`.
+
+The **client has one runtime**: `Client` is a command queue served by a single fiber on the runtime that owns the
+connection and its reader; the views submit attach/text/resize/history/close and get their events back on the FX thread.
+A view never starts a runtime of its own.
 
 ## Running it
 
@@ -52,17 +57,27 @@ exactly as the host holds it. (If the *host* dies, the shells are gone — see t
 > defined. That is Mill's daemon/launcher race, not this app — the window and host are unaffected when Mill
 > runs in-process (`./mill -i app.run` also works). The probes below already use `-i`.
 
-The probes are the test suite — each prints `PASS`/`FAIL` per check and exits non-zero on failure:
+The tests live in the test modules: JUnit 5 for the pure core, TestFX for the window, and the `runMain` probes for the
+parts that need a real PTY, a real daemon or a real scene. Each probe prints `PASS`/`FAIL` per check and exits non-zero on
+failure.
 
 ```bash
-./mill -i host.runMain corvi.host.HostProbe            # 49 checks: PTY, VT emulation, snapshot/damage, history, resize
-./mill -i host.runMain corvi.host.ProtocolProbe        # 30 checks: routes, typed errors, auth, pushes, reconnects
-./mill -i host.runMain corvi.host.HostDaemonProbe      # 22 checks: the socket daemon, token, stop, leaks, liveness
-./mill -i app.runMain corvi.app.CoreProbe              # 61 checks: the pure core, no toolkit at all
-./mill -i app.runMain corvi.app.RendererProbe          # 31 checks: the renderer, selection, scrollback, captures
-./mill -i app.runMain corvi.app.UiProbe                # 28 checks: the window, tabs, chords, bells, menus, drag
-./mill -i app.runMain corvi.app.RendererSnapshot       # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
+./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
+./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
+./mill -i renderer.test                                 # 14 JUnit tests: ScreenModel, Layout, Selection
+./mill -i app.test                                      # the TestFX suite: the daemon-backed window, end to end
+./mill -i host.test.runMain corvi.host.HostProbe        # 49 checks: PTY, VT emulation, snapshot/damage, history, resize
+./mill -i host.test.runMain corvi.host.ProtocolProbe    # 30 checks: routes, typed errors, auth, pushes, reconnects
+./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 23 checks: the socket daemon, token, stop, leaks, liveness, pushes
+./mill -i app.test.runMain corvi.app.RendererProbe      # 31 checks: the renderer, selection, scrollback, captures
+./mill -i app.test.runMain corvi.app.UiProbe            # 29 checks: the window, tabs, chords, bells, menus, drag
+./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
+
+`app.test` passes a socket of its own through `forkEnv` (a short `/tmp` path: a Unix socket path is limited to ~104
+bytes) and kills the daemon it started, so it never touches the user's host. It drives the window with the same JavaFX
+press/release/click events a person sends — the sequence that caught the tab bug — rather than TestFX's glass robot,
+because on macOS that robot needs Accessibility permission for the process and drops its events silently without it.
 
 `UiProbe` also writes `out/corvi-ui.png`, and `RendererSnapshot` writes the renderer's two. Those files are build output
 (`out/` is ignored); the captures are kept under `docs/screenshots/` — a snapshot of the scene is how this machine
@@ -182,6 +197,26 @@ rest jars) instead of a 284 MB browser framework, and no Chromium. The price is 
 footprint that does not shrink to a thin client's. Whether the trade is right depends on the rest of Corvi, which this
 spike does not measure.
 
+### Fixed after the first reviews
+
+The window lifecycle, the tab strip and the host's client registry each had a bug the probes missed; the tests below now cover them.
+
+- **Tabs stopped switching** after the first click on a tab. A tab's press set `TabDrag.Pressed` and only a completed drag or a drop
+  cleared it; any render while a gesture is in flight is deferred, so every later state change updated the model and painted nothing.
+  The release clears a press that never became a drag, and both `UiProbe` and `UiTest` now click with the real press/release/click
+  sequence instead of firing `MOUSE_CLICKED` alone.
+- **A blank first frame (the "black terminal")** came from `HostSessions.bind`: it read the client map and wrote it back (`clients.use`
+  then `clients.set`). The liveness-probe connection and the app's connection bind concurrently at startup, so each could write back the
+  map it had read and the later write silently dropped the other handler. That client had already attached, stayed in the session's
+  `attached` map with its socket open, and the push loop computed its damage and dropped it (`no handler for …`) forever — a blank screen
+  with a live connection. `bind` is now one atomic `getAndUpdate`; `pushDamage` also self-heals a client whose handler has gone (drops it
+  from the baselines and reports it once), and the unbind path clears both maps. **Evidence:** fifteen consecutive
+  `./mill --no-daemon app.test.testOnly corvi.app.UiTest` runs green, each painting the prompt in ~3.6 s, and the new
+  `corvi.host.BindTest` (64 concurrent binds over 8 threads) fails against the old read-then-set and passes against `getAndUpdate`.
+- **A second, empty window.** `JFXApp3.AutoShow` is off, the primary stage is the only window, and it is shown immediately with a
+  `StatusView` placeholder ("Connecting to the host…") that is replaced by the shell when the client answers — or by the failure, in the
+  window. Nothing waits on the FX thread for the host.
+
 ## Known limitations
 
 - **No reconnect when the host dies.** The UI attaches once; if the daemon goes away the window keeps the last frames it
@@ -197,7 +232,8 @@ spike does not measure.
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.
 - **The UI probes need a display server** (not a visible display); they drive real JavaFX events and real processes.
-  `CoreProbe` needs neither a display nor a host — it is the pure core, checked as values in and values out.
+  `ui.test` and `renderer.test` need neither a display nor a host — they are the pure core, checked as values in and
+  values out.
 - **No host-restart survival** and no session persistence across a host restart.
 
 ## Layout
