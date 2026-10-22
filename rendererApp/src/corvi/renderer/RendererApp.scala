@@ -22,8 +22,8 @@ object RendererApp extends scalafx.application.JFXApp3:
   override def start(): Unit =
     val metrics = TerminalMetrics.monospaced(13)
     val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
-    val view = TerminalView(running.service, running.session, metrics)
-    running.sink.plug(view)
+    val view = TerminalView(running.client.service, running.session, metrics)
+    running.client.sink.plug(view)
     view.setPrefSize(metrics.layout.width(cols), metrics.layout.height(rows))
 
     val scene = Scene(view, metrics.layout.width(cols) + 16, metrics.layout.height(rows))
@@ -31,7 +31,8 @@ object RendererApp extends scalafx.application.JFXApp3:
     window.setTitle("Corvi — renderer")
     window.setScene(scene)
     window.setOnCloseRequest(_ => {
-      // A closing tab releases its view before the host goes: the resize timer and the client's runtime would outlive it otherwise.
+      // A closing tab leaves the sink first, then releases its view: the resize timer and the client's runtime would outlive it otherwise.
+      running.client.sink.unplug(view)
       view.dispose()
       running.stop()
       Platform.exit()

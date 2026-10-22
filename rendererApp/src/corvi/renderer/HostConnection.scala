@@ -23,8 +23,12 @@ object HostConnection:
   /** How long a connect-to-test may take before the socket is treated as nobody's. */
   private val pingTimeout: scala.concurrent.duration.Duration = 500.millis
 
-  /** Connects, starting the daemon first if nothing answers, and says hello with the token from the file beside the socket. */
-  def ensure(sink: FrameSink)(using Frame): TerminalService < (Async & Scope & Abort[TerminalError | Closed]) =
+  /** Connects, starting the daemon first if nothing answers, and says hello with the token from the file beside the socket.
+    *
+    * The sink is made here, where the routes are wired to it, and leaves together with the service: a caller cannot pair a client with a
+    * sink its pushes do not go to.
+    */
+  def ensure()(using Frame): Client < (Async & Scope & Abort[TerminalError | Closed]) =
     for
       paths <- Sync.defer(HostPaths.defaultPaths())
       _ <- Sync.defer(paths.prepare())
@@ -34,13 +38,14 @@ object HostConnection:
         case Result.Success(_)     => Sync.defer(())
         case Result.Failure(error) => Abort.fail(HostUnavailable(error.toString))
         case Result.Panic(error)   => Abort.fail(HostUnavailable(error.toString))
-      service <- connect(paths, token, sink)
-    yield service
+      client <- connect(paths, token)
+    yield client
 
-  private def connect(paths: HostPaths, token: String, sink: FrameSink)(using
+  private def connect(paths: HostPaths, token: String)(using
       Frame
-  ): TerminalService < (Async & Scope & Abort[TerminalError | Closed]) =
+  ): Client < (Async & Scope & Abort[TerminalError | Closed]) =
     for
+      sink <- Sync.defer(new ViewSink())
       closed <- Latch.init(1)
       opened <- Abort.run[Throwable](SocketWire.connect(paths.socket, closed))
       wire <- opened match
@@ -51,7 +56,7 @@ object HostConnection:
       handler <- JsonRpcHandler.init(transport, ClientRoutes.routes(sink)*)
       service <- Sync.defer(TerminalClient(handler))
       _ <- service.hello(token)
-    yield service
+    yield Client(service, sink)
 
   private def connectOrStart(paths: HostPaths): Unit =
     if answers(paths.socket) then ()

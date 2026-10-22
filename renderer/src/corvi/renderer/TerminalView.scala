@@ -24,7 +24,15 @@ import scala.util.Try
   * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
   * full-screen program repainting on every step would be the expensive part.
   */
-final class TerminalView(service: TerminalService, session: SessionId, metrics: TerminalMetrics)
+object TerminalView:
+
+  /** Room kept for the scrollbar whether it is showing or not: a column that appears when history arrives would otherwise re-grid the
+    * terminal, and the host would be asked to resize for no reason the user can see. A factory fitting a new session to the window takes
+    * the same room off, so the first grid and the view's own agree.
+    */
+  val scrollbarWidth: Double = 16
+
+final class TerminalView(service: TerminalService, val session: SessionId, metrics: TerminalMetrics)
     extends BorderPane
     with FrameSink
     with SessionEvents:
@@ -40,6 +48,8 @@ final class TerminalView(service: TerminalService, session: SessionId, metrics: 
   private var failure: Option[String] = None
   private var end: Option[Ended] = None
   private var blinking: Boolean = false
+  private var activityListeners: Vector[() => Unit] = Vector.empty
+  private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
 
@@ -102,6 +112,14 @@ final class TerminalView(service: TerminalService, session: SessionId, metrics: 
   def ended: Option[Ended] = end
 
   def error: Option[String] = failure
+
+  /** Output arrived: what the shell's bell is made of. Called on the FX thread, after the frame is applied. */
+  def onOutput(listener: () => Unit): Unit =
+    activityListeners = activityListeners :+ listener
+
+  /** The shell behind this view ended. */
+  def onSessionEnded(listener: Ended => Unit): Unit =
+    endedListeners = endedListeners :+ listener
 
   def selectedText: Option[String] = selection.filterNot(_.isEmpty).map(cells => text(cells))
 
@@ -221,9 +239,11 @@ final class TerminalView(service: TerminalService, session: SessionId, metrics: 
 
   private def acceptEnd(ended: Ended): Unit =
     end = Some(ended)
+    endedListeners.foreach(listener => listener(ended))
     redraw()
 
   private def applyDamage(damage: Damage): Unit =
+    if !damage.isEmpty then activityListeners.foreach(listener => listener())
     model.foreach { current =>
       val next = current.withFrame(current.frame.apply(damage))
       model = Some(next)
@@ -257,12 +277,7 @@ final class TerminalView(service: TerminalService, session: SessionId, metrics: 
   /** The grid the view has room for, in cells. */
   private def gridForSize(): (Int, Int) =
     val layout = metrics.layout
-    (layout.colsFor(math.max(0, getWidth) - scrollbarWidth), layout.rowsFor(math.max(0, getHeight)))
-
-  /** Room kept for the scrollbar whether it is showing or not: a column that appears when history arrives would otherwise re-grid the
-    * terminal, and the host would be asked to resize for no reason the user can see.
-    */
-  private def scrollbarWidth: Double = 16
+    (layout.colsFor(math.max(0, getWidth) - TerminalView.scrollbarWidth), layout.rowsFor(math.max(0, getHeight)))
 
   private def scheduleResize(): Unit =
     if model.isDefined then
@@ -274,7 +289,7 @@ final class TerminalView(service: TerminalService, session: SessionId, metrics: 
     */
   private def requestGridForSize(): Unit =
     model.foreach { current =>
-      if getWidth > scrollbarWidth && getHeight > 0 then
+      if getWidth > TerminalView.scrollbarWidth && getHeight > 0 then
         val (cols, rows) = gridForSize()
         if cols != current.cols || rows != current.rows then bridge.requestResize(TermSize(cols = cols, rows = rows))
     }

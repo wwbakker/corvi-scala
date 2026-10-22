@@ -1,8 +1,8 @@
 package corvi.renderer
 
 import corvi.contract.*
+import corvi.renderer.TerminalView as TerminalPane
 import corvi.host.HostSession
-import corvi.protocol.Ended
 import java.awt.image.BufferedImage
 import java.nio.file.{Files, Paths}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
@@ -51,8 +51,8 @@ object RendererProbe:
     var stage: Option[Stage] = None
     try
       val metrics = onFx(TerminalMetrics.monospaced(fontSize))
-      val view = onFx(TerminalView(running.service, running.session, metrics))
-      running.sink.plug(view)
+      val view = onFx(TerminalPane(running.client.service, running.session, metrics))
+      running.client.sink.plug(view)
       val scene = onFx {
         view.setPrefSize(metrics.layout.width(cols), metrics.layout.height(rows))
         val created = Scene(view, metrics.layout.width(cols), metrics.layout.height(rows))
@@ -71,9 +71,9 @@ object RendererProbe:
       })
       val layout = metrics.layout
       // The second view lives in a scene of its own, so it lays out and asks for a grid like a real one would.
-      val second: Option[TerminalView] = running.extras.headOption.map { id =>
-        val created = onFx(TerminalView(running.service, id, metrics))
-        running.sink.plug(created)
+      val second: Option[TerminalPane] = running.extras.headOption.map { id =>
+        val created = onFx(TerminalPane(running.client.service, id, metrics))
+        running.client.sink.plug(created)
         val _ = onFx(new Scene(new javafx.scene.layout.StackPane(created), metrics.layout.width(60), metrics.layout.height(16)))
         created
       }
@@ -105,7 +105,7 @@ object RendererProbe:
     def failures: Int = failed
 
   /** The prompt, its colours, and the pixels that back them. */
-  private def paintChecks(view: TerminalView, scene: Scene, layout: Layout, reporter: Reporter): Unit =
+  private def paintChecks(view: TerminalPane, scene: Scene, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
     val prompted = poll(waitTimeout)(onFx(view.screen).exists(model => rowsOf(model).exists(_.contains("»"))))
     report("the host's prompt is painted", prompted, onFx(view.screen).map(model => rowsOf(model).mkString(" / ")).getOrElse("no model"))
@@ -177,7 +177,7 @@ object RendererProbe:
     )
 
   /** The canvas changes when the frame does, and the change is visible, not just in the model. */
-  private def damageChecks(view: TerminalView, scene: Scene, layout: Layout, reporter: Reporter): Unit =
+  private def damageChecks(view: TerminalPane, scene: Scene, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
     val before = capture(scene)
     // The marker is assembled by the shell, so the echoed command line cannot contain it: only the output can.
@@ -202,7 +202,7 @@ object RendererProbe:
     )
 
   /** Selection over the visible cells, and the text a copy would put on the clipboard. */
-  private def selectionChecks(view: TerminalView, reporter: Reporter): Unit =
+  private def selectionChecks(view: TerminalPane, reporter: Reporter): Unit =
     val report = reporter.report
     // The output row: the one whose cells carry the attributes the command asked for, so the echoed command line cannot be picked instead.
     val rowOfRed =
@@ -221,7 +221,7 @@ object RendererProbe:
     report("clearing the selection empties the copy", onFx(view.selectedText).isEmpty, "")
 
   /** History above the grid, and the way back to it. */
-  private def scrollbackChecks(view: TerminalView, reporter: Reporter, layout: Layout)(using staging: Option[Stage]): Unit =
+  private def scrollbackChecks(view: TerminalPane, reporter: Reporter, layout: Layout)(using staging: Option[Stage]): Unit =
     val report = reporter.report
     onFx(view.typeText("seq 1 200\n"))
     val flooded = poll(waitTimeout)(onFx(view.frame).exists(f => lines(frame = f).exists(_.trim == "200")))
@@ -286,7 +286,7 @@ object RendererProbe:
     )
 
   /** The window's size reaches the host, and the grid comes back the right shape. */
-  private def resizeChecks(view: TerminalView, stage: Stage, layout: Layout, reporter: Reporter): Unit =
+  private def resizeChecks(view: TerminalPane, stage: Stage, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
     val before = onFx(view.screen).map(_.cols).getOrElse(cols)
     onFx {
@@ -319,7 +319,7 @@ object RendererProbe:
     )
 
   /** Wide and astral characters: one glyph over two cell widths, and the continuation cell left alone. */
-  private def wideChecks(view: TerminalView, scene: Scene, layout: Layout, reporter: Reporter): Unit =
+  private def wideChecks(view: TerminalPane, scene: Scene, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
     onFx(view.typeText("printf '世界 😀\\r'"))
     val arrived = poll(waitTimeout)(onFx(view.frame).exists(_.rows.exists(_.cells.exists(_.width == CellWidth.Wide))))
@@ -346,7 +346,7 @@ object RendererProbe:
     )
 
   /** The cursor: filled with the keyboard, hollow without it, and steady when blinking is switched off. */
-  private def focusChecks(view: TerminalView, scene: Scene, layout: Layout, reporter: Reporter): Unit =
+  private def focusChecks(view: TerminalPane, scene: Scene, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
     onFx(view.scrollTo(0))
     onFx(view.setCursorBlinking(false))
@@ -397,9 +397,9 @@ object RendererProbe:
 
   /** Two sessions on one host: each view holds its own session's frame, at its own size, and neither shows the other's screen. */
   private def twoSessionsCheck(
-      first: TerminalView,
+      first: TerminalPane,
       firstSession: SessionId,
-      maybeSecond: Option[TerminalView],
+      maybeSecond: Option[TerminalPane],
       secondSession: Option[SessionId],
       reporter: Reporter
   ): Unit =
@@ -421,7 +421,7 @@ object RendererProbe:
       case None => report("two views on one host hold their own sessions", false, "no second session")
 
   /** Closing the session from the view is the tab-close path, and the host reports it as a closed session. */
-  private def closeSessionChecks(view: TerminalView, reporter: Reporter): Unit =
+  private def closeSessionChecks(view: TerminalPane, reporter: Reporter): Unit =
     val report = reporter.report
     onFx(view.closeSession())
     val ended = poll(waitTimeout)(onFx(view.ended).exists(_.closed))
@@ -433,7 +433,7 @@ object RendererProbe:
     onFx(view.dispose())
 
   /** The PNG a human can look at, and the guarantee that it is not blank. */
-  private def captureChecks(view: TerminalView, scene: Scene, reporter: Reporter): Unit =
+  private def captureChecks(view: TerminalPane, scene: Scene, reporter: Reporter): Unit =
     val report = reporter.report
     onFx(view.scrollTo(0))
     val image = capture(scene)
@@ -518,7 +518,7 @@ object RendererProbe:
   /** The frame and the image it produced, taken in one go: reading the model and the pixels separately lets the shell paint between them,
     * and then a check compares a cursor position with a picture from a different moment.
     */
-  private def shoot(view: TerminalView, scene: Scene): (Option[corvi.contract.Frame], BufferedImage) =
+  private def shoot(view: TerminalPane, scene: Scene): (Option[corvi.contract.Frame], BufferedImage) =
     onFx {
       val frame = view.frame
       val image: WritableImage = scene.snapshot(null)
@@ -531,7 +531,7 @@ object RendererProbe:
     }
 
   /** Waits until the screen stops changing, so a shot is not of a half-painted frame. */
-  private def still(view: TerminalView): Unit =
+  private def still(view: TerminalPane): Unit =
     val _ = poll(waitTimeout) {
       val one = onFx(view.frame)
       Thread.sleep(30)
@@ -598,7 +598,7 @@ object RendererProbe:
     buffered
 
   /** Waits until the last non-empty row is the prompt, which is the only state in which a typed command is a command. */
-  private def waitForPrompt(view: TerminalView): Boolean =
+  private def waitForPrompt(view: TerminalPane): Boolean =
     poll(waitTimeout) {
       onFx(view.frame).exists(f => lines(f).filter(_.nonEmpty).lastOption.exists(_.contains("»")))
     }

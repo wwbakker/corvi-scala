@@ -168,7 +168,7 @@ object renderer extends ScalaModule:
   def mvnDeps = Task {
     Seq(
       mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library"
-    ) ++ Seq("base", "graphics", "controls")
+    ) ++ Seq("base", "graphics", "controls", "media")
       .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
   }
 
@@ -189,7 +189,7 @@ object renderer extends ScalaModule:
 /** The window, the snapshot harness and the probe: they start a real host, which is the dependency the `renderer` module must not have. */
 object rendererApp extends ScalaModule:
   def scalaVersion = "3.10.0"
-  def moduleDeps = Seq(renderer, host)
+  def moduleDeps = Seq(renderer, host, ui)
   def mainClass = Some("corvi.renderer.RendererApp")
 
   def scalacOptions = Seq(
@@ -208,3 +208,36 @@ object rendererApp extends ScalaModule:
     "-Dkyo.scheduler.virtualizeWorkers=true",
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
   )
+
+/** The Corvi shell: sidebar, tab strip, Overview and the terminal area, over plain interfaces from `contract`. It depends on nothing of ours
+  * but `contract`, so it can be run against a fake view factory and knows nothing about Kyo, the host or the renderer internals.
+  */
+object ui extends ScalaModule:
+  def scalaVersion = "3.10.0"
+  def moduleDeps = Seq(contract)
+
+  def scalacOptions = Seq(
+    "-Wunused:all",
+    "-Wvalue-discard",
+    "-Wnonunit-statement",
+    "-Wconf:msg=@nowarn annotation does not suppress any warnings:s," +
+      "msg=unused:e," +
+      "msg=(discarded.*value|pure.*statement):error," +
+      "msg=match may not be exhaustive:e",
+    "-language:strictEquality",
+    "-Xmax-inlines:128"
+  )
+
+  def mvnDeps = Task {
+    Seq(
+      mvn"org.scalafx::scalafx:26.0.0-R38;$noTransitiveOpenJfx;$noTransitiveScala3Library"
+    // `media` is not a compile-only dependency: ScalaFX's `Includes` resolves `javafx.scene.media.MediaException` the first time
+    // an implicit conversion is applied, so the module has to be on the runtime classpath of any ScalaFX window.
+    ) ++ Seq("base", "graphics", "controls", "media")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }
+
+  def compileMvnDeps = Task {
+    Seq("web", "swing")
+      .map(m => mvn"org.openjfx:javafx-$m:$javafxVersion;classifier=$javafxClassifier;$noTransitiveOpenJfx")
+  }

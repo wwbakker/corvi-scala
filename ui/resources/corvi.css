@@ -1,0 +1,220 @@
+/* Corvi's palette, copied from apps/web/src/app-root/styles.css. JavaFX has no color-mix(), so the
+   two derived tones are computed here: --raise is color-mix(surface 94%, text), --selection is
+   color-mix(accent 35%, transparent). Custom properties on `.root` are looked-up colours, which is
+   how the classes below stay free of literal hex values. JavaFX has neither letter-spacing nor
+   text-transform, so the labels upstream uppercases are written uppercase in the shell. */
+.root {
+    -fx-corvi-bg:        #14161a;
+    -fx-corvi-surface:   #1c1f25;
+    -fx-corvi-well:      #0d1117;
+    -fx-corvi-text:      #dfe3ea;
+    -fx-corvi-muted:     #8b93a1;
+    -fx-corvi-faint:     #565f6c;
+    -fx-corvi-on-accent: #ffffff;
+    -fx-corvi-accent:    #316dca;
+    -fx-corvi-info:      #6cb6ff;
+    -fx-corvi-ok:        #3fb950;
+    -fx-corvi-warn:      #d29922;
+    -fx-corvi-error:     #f85149;
+    -fx-corvi-purple:    #a371f7;
+    -fx-corvi-ideation:  #4cc2c4;
+    -fx-corvi-line:      #2b3038;
+    -fx-corvi-raise:     #282b31;
+    -fx-corvi-selection: rgba(49, 109, 202, 0.35);
+
+    -fx-background-color: -fx-corvi-bg;
+}
+
+/* Sidebar — fixed decoration. */
+
+.sidebar {
+    -fx-background-color: -fx-corvi-surface;
+    -fx-border-color: -fx-corvi-line;
+    -fx-border-width: 0 1 0 0;
+    -fx-padding: 10 0 10 0;
+    -fx-spacing: 1;
+}
+
+.sidebar-header {
+    -fx-padding: 2 12 10 12;
+    -fx-spacing: 6;
+}
+
+.sidebar-header .label {
+    -fx-text-fill: -fx-corvi-text;
+    -fx-font-size: 13px;
+}
+
+.sidebar-section {
+    -fx-padding: 16 12 5 12;
+}
+
+.group-label {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 11px;
+}
+
+/* Creating something is the affirmative action: a green wash, not green text. */
+.new-chip {
+    -fx-background-color: rgba(63, 185, 80, 0.25);
+    -fx-background-radius: 6;
+    -fx-border-color: -fx-corvi-ok;
+    -fx-border-radius: 6;
+    -fx-border-width: 1;
+    -fx-text-fill: -fx-corvi-text;
+    -fx-font-size: 12px;
+    -fx-padding: 3 8 3 8;
+}
+
+.sidebar-row {
+    -fx-padding: 5 12 5 9;
+    -fx-border-color: transparent;
+    -fx-border-width: 0 0 0 3;
+}
+
+.sidebar-row .label {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 12px;
+}
+
+.sidebar-row:hover {
+    -fx-background-color: -fx-corvi-raise;
+}
+
+.sidebar-row:hover .label {
+    -fx-text-fill: -fx-corvi-text;
+}
+
+.sidebar-row.selected {
+    -fx-background-color: -fx-corvi-selection;
+    -fx-border-color: transparent transparent transparent -fx-corvi-accent;
+}
+
+.sidebar-row.selected .label {
+    -fx-text-fill: -fx-corvi-text;
+}
+
+.sidebar-footer {
+    -fx-border-color: -fx-corvi-line;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 8 12 0 12;
+}
+
+.gear-icon {
+    -fx-stroke: -fx-corvi-muted;
+    -fx-fill: transparent;
+    -fx-stroke-width: 2;
+    -fx-stroke-line-cap: round;
+    -fx-stroke-line-join: round;
+}
+
+/* The window strip: Overview | <windows…> | new. Tabs sit flush against each other; only the rows
+   of a wrapped strip are set apart, by the FlowPane's vgap. */
+
+.window-tabs {
+    -fx-background-color: -fx-corvi-surface;
+    -fx-border-color: -fx-corvi-line;
+    -fx-border-width: 0 0 1 0;
+}
+
+.window-tab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 6 6 0 0;
+    -fx-padding: 4 10 4 10;
+    -fx-cursor: hand;
+}
+
+/* The tab a drag is carrying. */
+.window-tab.dragging {
+    -fx-opacity: 0.4;
+}
+
+.window-tab:hover {
+    -fx-background-color: -fx-corvi-raise;
+}
+
+.window-tab .label {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 12px;
+}
+
+/* A window whose shell has stopped is quieter than a running one — but only while it is neither
+   current nor hovered. JavaFX has no `:not()`, so the cascade says it: this rule sits between the
+   plain one above and the two below, which is what keeps a current ended tab's label
+   `-fx-corvi-on-accent` and a hovered one `-fx-corvi-text`. The icon keeps the state's own colour
+   (red) either way, as it does on any tab. */
+.window-tab.ended .label {
+    -fx-text-fill: -fx-corvi-faint;
+}
+
+.window-tab:hover .label {
+    -fx-text-fill: -fx-corvi-text;
+}
+
+.window-tab.current {
+    -fx-background-color: -fx-corvi-selection;
+}
+
+.window-tab.current .label {
+    -fx-text-fill: -fx-corvi-on-accent;
+}
+
+/* Upstream spells this `:not(.current)`. JavaFX has no `:not()`, so the current tab restates its
+   own dress after the hover rules and keeps it while the pointer is over it. */
+.window-tab.current:hover {
+    -fx-background-color: -fx-corvi-selection;
+}
+
+.window-tab.current:hover .label {
+    -fx-text-fill: -fx-corvi-on-accent;
+}
+
+/* The state icon keeps its own colour even when its tab is current; a tab with no state to report
+   leaves the icon the tab's own muted colour (the `new` tab). */
+.tab-icon {
+    -fx-stroke: -fx-corvi-muted;
+    -fx-fill: transparent;
+    -fx-stroke-width: 2;
+    -fx-stroke-line-cap: round;
+    -fx-stroke-line-join: round;
+}
+
+.tab-icon.idle {
+    -fx-stroke: -fx-corvi-faint;
+}
+
+/* The shell has stopped: the palette has no separate "dead" tone, and `--error` is the one that
+   reads as "this window is not running any more". */
+.tab-icon.ended {
+    -fx-stroke: -fx-corvi-error;
+}
+
+/* The 6 px dot for output that arrived in a window you were not looking at. */
+.bell {
+    -fx-background-color: -fx-corvi-warn;
+    -fx-background-radius: 3;
+    -fx-min-width: 6;
+    -fx-min-height: 6;
+    -fx-pref-width: 6;
+    -fx-pref-height: 6;
+    -fx-max-width: 6;
+    -fx-max-height: 6;
+}
+
+/* The well the terminals sit in, and the Overview placeholder that shares it. */
+
+.terminal-area {
+    -fx-background-color: -fx-corvi-well;
+}
+
+/* The Overview tab's content. The title rule has to come after the generic `.label` one: JavaFX
+   has no `:not()`, and it ranks the two equally. */
+.overview-placeholder .label {
+    -fx-text-fill: -fx-corvi-faint;
+    -fx-font-size: 12px;
+}
+
+.overview-placeholder .overview-title {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 20px;
+}

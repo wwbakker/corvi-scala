@@ -2,7 +2,6 @@ package corvi.renderer
 
 import corvi.contract.*
 import corvi.host.TerminalPeers
-import corvi.protocol.*
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import kyo.*
@@ -13,17 +12,13 @@ import kyo.Frame
   */
 object Harness:
 
-  /** The sink the host pushes to. The view needs the service and the service needs the sink, so the sink is created empty and the view is
-    * plugged in once both exist.
+  /** A running harness host, and the client its pushes are wired to. The service and the sink are one `Client`, so a caller can only build
+    * a view over the pair the host is actually pushing to.
     */
-  /** The in-memory harness uses the same sink as the daemon-backed window: pushes go to every plugged view. */
-  type Sink = ViewSink
-
   final case class Running(
-      service: TerminalService,
+      client: Client,
       session: SessionId,
       extras: Vector[SessionId],
-      sink: Sink,
       host: TerminalPeers.InMemoryHost,
       stop: () => Unit
   )
@@ -52,10 +47,9 @@ object Harness:
               outcome.set(
                 Right(
                   Running(
-                    service = wired.client,
+                    client = Client(wired.client, sink),
                     session = created.id,
                     extras = Vector(second.id),
-                    sink = sink,
                     host = host,
                     stop = () => stopping.countDown()
                   )

@@ -28,6 +28,7 @@ object Schemas:
   given Schema[RowDamage] = Schema.derived
   given Schema[SessionInfo] = Schema.derived
   given Schema[Damage] = Schema.derived
+  given Schema[Ended] = Schema.derived
 
   // The typed route errors carry their own payloads: a case class with a `using Frame` cannot be derived, and the wire only needs the
   // fields a client can act on.

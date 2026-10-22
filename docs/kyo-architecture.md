@@ -197,6 +197,40 @@ they start a real host.
 - **Resize.** Debounced in the view (500 ms, 100 ms on the alternate screen) because the side that owns the window is the only one that knows
   whether the user is still dragging its edge; the host applies what it is told.
 
+## The shell
+
+`ui` is the window: the sidebar, the tab strip, the Overview placeholder and the mount points for the terminals. It depends on
+`contract` **only** — no Kyo, no protocol, no renderer, no VT engine — so `ShellView`, `ShellState`, `Chords` and the strip can be driven
+through a fake factory and know nothing about where pixels or bytes come from.
+
+- **The seam.** `contract.TerminalView` is one terminal on screen: a node, focus, a lifetime, and the two signals a tab needs (output
+  arrived, the shell ended). `contract.TerminalViewFactory` is where views come from, plus what a tab needs beyond showing one: `create`,
+  `close`, and the `gridFor` size query. **Every callback runs on the UI thread**: `RendererViewFactory` hops with `Platform.runLater`, and
+  the views promise it on their side (`SessionEvents`). The shell therefore guards no state and never enters an effect.
+- **Sink ownership.** A view hears its session's damage only if it is plugged into the sink the client's push routes were wired with. That is
+  not a convention but a value: `rendererApp.Client(service, sink)` is made in the one place the client is made (`Harness.start`,
+  `HostConnection.ensure`), `RendererViewFactory` takes the whole `Client`, and `dispose` unplugs the view so a closed tab stops being
+  iterated. Choosing a second sink is exactly what once left every tab parked on its seeded frame.
+- **Create and close are asynchronous.** They are offered to the client's own runtime (`Client.Calls`, one fiber draining a blocking queue,
+  the same shape as a session's command loop) and report back through `Platform.runLater`. Nothing on the FX thread waits for the host, so a
+  wedged daemon freezes neither the window nor the strip; a tab appears when the host has answered, and a refusal is `onCreated(None)`.
+- **Render policy.** The state is one immutable `ShellState`; a transition that returns the same value does not repaint at all (output in the
+  window you are looking at changes nothing). A render during a tab drag is deferred (`TabDragState`) and flushed when the gesture ends,
+  because it would otherwise update the nodes the drag is running on. The strip keeps one tab node per window and **updates it in place** —
+  label, bell, style classes, tooltip — touching the children list only when the set or order of windows changes. Rebuilding the strip
+  wholesale would take the node a tab's `ContextMenu` hangs off out of the scene, so a bell on a neighbouring tab could close a menu you
+  were using.
+- **`gridFor`**: a new session is asked for at the grid the terminal area has now, so the host's first frame already fits the window. Before
+  the first layout the area has no size and the factory's default (100×28) stands in.
+- **Ending.** `Ended` is carried into the window rather than discarded: `Ending.Exited(code)` (a natural exit; the code is in the tab's label
+  and tooltip), `Ending.Failed(reason)` (the reader died; the tooltip carries the reason) or `Ending.Closed` (a client close — you closed the
+  tab — with no extra marker). `closed` wins over everything else: a close's code is the signal the host sent, not the shell's own status.
+  Otherwise a reader failure is `Failed` and a code is `Exited`. An ended window stops asking for attention, so it never bells.
+- **Not built: reconnect.** `ShellApp` ensures the host, lists once and attaches; if the daemon goes away the window keeps the last frames it
+  received. The architecture already makes a host's death the shells' death, so this phase records the gap instead of hiding it: restarting
+  the window reattaches to whatever host answers then. A UI restart against a *live* host works — that is the case that was in scope.
+- The duplicate Ox sources in `app/` are still in the tree and are still what `./mill app.run` runs; removing them is the next chunk.
+
 ## The daemon
 
 `corvi.host.HostMain` is the long-lived process: a `KyoApp` with no JavaFX that holds the shells and listens on a Unix domain socket. The UI
@@ -245,8 +279,9 @@ host       PTY + jeditermfx-core emulator, HostSession, HostSessions (registry +
            depends on contract and protocol
 renderer   thin JavaFX canvas: Frame → cells, cursor, selection, scrollback; depends on contract, protocol, ScalaFX
 rendererApp window, snapshot harness and probe: they start a real host, which the renderer must not
-ui         shell/tabs/sidebar/state/chords; depends on contract (+ renderer's view factory)
-app        composition root: ensure host, connect, build the UI, launch JavaFX
+ui         shell/tabs/sidebar/state/chords; depends on contract only, over the TerminalView seam
+app        the old Ox app, still built and still what `./mill app.run` starts; removed next phase.
+           The Kyo window is `rendererApp`'s `ShellApp`
 ```
 
 The UI is testable with a fake `TerminalService`; the host and renderer are testable headlessly.
@@ -271,8 +306,10 @@ The UI is testable with a fake `TerminalService`; the host and renderer are test
 - `open` registers the closer **after** the fiber, so on scope close the connector closes first
   and wakes the parked read; that ordering is what makes teardown finish instead of waiting for
   a read that will never return.
-- UI: one Kyo `Scope` on a dedicated runtime owns the client and reader fibers. The FX thread is
-  a boundary: commands in, snapshots/damage out via `Platform.runLater`; nothing blocks on FX.
+- UI: each view owns its Kyo runtime (`TerminalSession`: one fiber draining a command queue, around
+  the attach), and the client owns one more for the tab operations that outlive a view
+  (`Client.Calls`: create and close). The FX thread is a boundary: commands in, snapshots and damage
+  out via `Platform.runLater`; nothing blocks on FX.
 - `kyo.scheduler.virtualizeWorkers = true` so fibers run on Loom virtual threads.
 - Explicit `A < S`; `kyo-direct` only if a suspension graph justifies it later.
 - Required compiler flags: `-Wunused:all`, `-Wvalue-discard`, `-Wnonunit-statement`, the `-Wconf`
@@ -327,4 +364,4 @@ Host restart survival, remote hosts, find/hyperlinks/IME (renderer follow-ups), 
 5,000 rows of scrollback per session (UI cache and host history); base64 damage initially;
 selection/copy local in the renderer; scrollback paged from the host; a resize is applied on the
 caller's thread under the buffer lock (the PTY is resized at once, so a full-screen program
-redraws through SIGWINCH).
+redraws through SIGWINCH). The UI does not reconnect to a host that dies (see "The shell").

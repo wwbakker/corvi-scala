@@ -190,6 +190,9 @@ measure.
   leaves the terminal in raw mode is not exercised — the shell dies with its session either way, and
   nothing here tries to restore a terminal's termios state.
 - **The probes are the only tests**, and they need a display *server* (not a visible one) to run.
+- **The Kyo UI does not reconnect.** `corvi.renderer.ShellApp` reattaches to a running host when it starts, but a host that dies leaves the
+  window on its last frames; restart the window to reconnect. The Kyo rewrite, the `ui`/`host` modules and this gap are written up in
+  [`docs/kyo-architecture.md`](docs/kyo-architecture.md) ("The shell").
 - **Not measured:** Electron's startup; CPU or energy use of either app; the spike's memory after hours of
   use (its samples are seconds after startup, while the Electron samples are after hours); a shipped JVM
   runtime's size; whether the two native stacks agree on what they load; the rest of the app's screens in

@@ -31,8 +31,8 @@ object RendererSnapshot extends scalafx.application.JFXApp3:
   override def start(): Unit =
     val metrics = TerminalMetrics.monospaced(13)
     val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
-    val view = TerminalView(running.service, running.session, metrics)
-    running.sink.plug(view)
+    val view = TerminalView(running.client.service, running.session, metrics)
+    running.client.sink.plug(view)
     view.setPrefSize(metrics.layout.width(cols), metrics.layout.height(rows))
 
     val scene = Scene(view, metrics.layout.width(cols) + 16, metrics.layout.height(rows))
@@ -68,6 +68,7 @@ object RendererSnapshot extends scalafx.application.JFXApp3:
     val image = toBufferedImage(scene.snapshot(null))
     view.showFocus(false)
     val unfocused = toBufferedImage(scene.snapshot(null))
+    running.client.sink.unplug(view)
     running.stop()
     if isBlank(image) then
       java.lang.System.err.println("RendererSnapshot: the render is blank, so nothing was written")
