@@ -3,8 +3,8 @@ package corvi.renderer
 import corvi.contract.*
 import corvi.host.TerminalPeers
 import corvi.protocol.*
-import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import kyo.*
 import kyo.Frame
 
@@ -16,19 +16,8 @@ object Harness:
   /** The sink the host pushes to. The view needs the service and the service needs the sink, so the sink is created empty and the view is
     * plugged in once both exist.
     */
-  final class Sink extends FrameSink:
-    private val targets = AtomicReference[Vector[TerminalView]](Vector.empty)
-
-    /** Every plugged view hears every push and drops the sessions that are not its own, which is what makes one client serve several tabs.
-      */
-    def plug(view: TerminalView): Unit =
-      val _ = targets.updateAndGet(current => current :+ view)
-
-    def damage(id: SessionId, damage: Damage): Unit < Sync =
-      Sync.defer(targets.get.foreach(view => view.pushDamage(id, damage)))
-
-    def ended(id: SessionId, ended: Ended): Unit < Sync =
-      Sync.defer(targets.get.foreach(view => view.pushEnded(id, ended)))
+  /** The in-memory harness uses the same sink as the daemon-backed window: pushes go to every plugged view. */
+  type Sink = ViewSink
 
   final case class Running(
       service: TerminalService,
@@ -43,7 +32,7 @@ object Harness:
     * process should call it first, so a harness cannot leave a shell behind.
     */
   def start(cols: Int, rows: Int, pushInterval: kyo.Duration, command: Seq[String]): Running =
-    val sink = new Harness.Sink()
+    val sink = new ViewSink()
     val ready = CountDownLatch(1)
     val stopping = CountDownLatch(1)
     val outcome = AtomicReference[Either[String, Running]](Left("the host did not start"))

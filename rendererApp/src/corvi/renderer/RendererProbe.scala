@@ -63,6 +63,9 @@ object RendererProbe:
         window.setScene(scene)
         window.show()
         view.setCursorBlinking(false)
+        // A harness without a window manager says which state it is in: the checks below assume the keyboard is the terminal's, and
+        // `focusChecks` switches it off explicitly to look at the hollow cursor.
+        view.showFocus(true)
         view.requestFocus()
         window
       })

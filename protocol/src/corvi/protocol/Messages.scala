@@ -37,5 +37,8 @@ object Messages:
   /** `session.damage`: a frame delta, which carries the session because a `Damage` is about a screen and not a session. */
   final case class DamageParams(id: SessionId, damage: Damage) derives Schema, CanEqual
 
+  /** `host.hello`: the token from the daemon's token file. The first thing every connection says. */
+  final case class HelloParams(token: String) derives Schema, CanEqual
+
   /** `session.ended`: how the session ended, once. */
   final case class EndedParams(id: SessionId, ended: Ended) derives Schema, CanEqual

@@ -37,10 +37,17 @@ object Schemas:
     Schema.stringSchema.transform[SessionEnded](raw => SessionEnded(SessionId(raw)))(_.id.value)
   given Schema[ClientAlreadyBound] =
     Schema.stringSchema.transform[ClientAlreadyBound](raw => ClientAlreadyBound(ClientId(raw)))(_.id.value)
+  given Schema[Unauthorized] =
+    Schema.stringSchema.transform[Unauthorized](reason => Unauthorized(reason))(_.reason)
+  given Schema[HostUnavailable] =
+    Schema.stringSchema.transform[HostUnavailable](reason => HostUnavailable(reason))(_.reason)
   given Schema[SessionFailed] =
     summon[Schema[FailurePayload]].transform[SessionFailed](payload => SessionFailed(SessionId(payload.id), payload.reason))(failed =>
       FailurePayload(failed.id.value, failed.reason)
     )
+
+/** What the daemon says about itself: enough for a client to tell it is talking to the host it left, and how much that host is holding. */
+final case class HostStatus(pid: Long, sessions: Int, uptimeMillis: Long) derives Schema, CanEqual
 
 /** What `SessionFailed` puts on the wire. */
 final case class FailurePayload(id: String, reason: String) derives Schema, CanEqual

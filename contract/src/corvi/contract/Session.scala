@@ -27,5 +27,6 @@ final case class SessionInfo(
     index: Int,
     size: TermSize,
     historyRows: Int,
-    running: Boolean
+    running: Boolean,
+    shellPid: Long
 ) derives CanEqual

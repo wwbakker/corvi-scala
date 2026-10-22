@@ -14,6 +14,15 @@ import kyo.Frame
   * modes, so they arrive with the renderer's key handling rather than as a rename later.
   */
 private[corvi] trait TerminalService:
+
+  /** Says who we are: the daemon's token, from the file next to its socket. Every other call needs it first. */
+  def hello(token: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+
+  def status(using Frame): HostStatus < (Async & Abort[TerminalError | Closed])
+
+  /** Asks the daemon to shut down, ending every shell it holds. */
+  def stop(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+
   def list(using Frame): Seq[SessionInfo] < (Async & Abort[TerminalError | Closed])
   def create(cwd: String, size: TermSize)(using Frame): SessionInfo < (Async & Abort[TerminalError | Closed])
   def attach(id: SessionId)(using Frame): Snapshot < (Async & Abort[TerminalError | Closed])
@@ -33,6 +42,15 @@ private[corvi] trait FrameSink:
 private[corvi] final class TerminalClient(handler: JsonRpcHandler) extends TerminalService:
   import Messages.*
   import Schemas.given
+
+  def hello(token: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[HelloParams, Unit](Methods.Hello, HelloParams(token)))
+
+  def status(using Frame): HostStatus < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[Unit, HostStatus](Methods.Status, ()))
+
+  def stop(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[Unit, Unit](Methods.Stop, ()))
 
   def list(using Frame): Seq[SessionInfo] < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[Unit, Seq[SessionInfo]](Methods.List, ()))
@@ -79,6 +97,7 @@ private[corvi] object TerminalClient:
           case TerminalError.UnknownSessionCode => Structure.decode[UnknownSession](data).toMaybe
           case TerminalError.SessionFailedCode  => Structure.decode[SessionFailed](data).toMaybe
           case TerminalError.SessionEndedCode   => Structure.decode[SessionEnded](data).toMaybe
+          case TerminalError.UnauthorizedCode   => Structure.decode[Unauthorized](data).toMaybe
           case _                                => Maybe.Absent
       case Maybe.Absent => Maybe.Absent
     decoded.getOrElse(RemoteError(error.code, error.message))

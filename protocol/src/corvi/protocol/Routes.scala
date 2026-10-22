@@ -19,6 +19,11 @@ object Methods:
   val Damage: String = "session.damage"
   val Ended: String = "session.ended"
 
+  // The daemon's own methods, which every connection needs before it can touch a session.
+  val Hello: String = "host.hello"
+  val Stop: String = "host.stop"
+  val Status: String = "host.status"
+
 /** The routes a client peer answers: the host's two pushes. */
 object ClientRoutes:
   import Messages.*

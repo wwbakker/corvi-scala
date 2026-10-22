@@ -31,7 +31,11 @@ object TerminalPeers:
       for
         transports <- JsonRpcTransport.inMemory
         (clientSide, hostSide) = transports
-        hostHandler <- JsonRpcHandler.init(hostSide, HostRoutes.routes(sessions, id)*)
+        // In memory both peers are one process and there is no door to knock on, so the connection is trusted from the start.
+        hostHandler <- JsonRpcHandler.init(
+          hostSide,
+          HostRoutes.routes(sessions, Connection.trusted(id), java.lang.System.currentTimeMillis(), Sync.defer(()))*
+        )
         bound <- sessions.bind(id, hostHandler)
         _ <- if bound then Sync.defer(()) else Abort.fail(ClientAlreadyBound(id))
         clientHandler <- JsonRpcHandler.init(clientSide, ClientRoutes.routes(sink)*)

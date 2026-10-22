@@ -135,6 +135,21 @@ Still planned, not built: `Channel`/`Signal` between the reader and the push loo
 and `session.mouse`, a supervisor fiber per host with its own scope, and the ended-session reap
 policy.
 
+### Daemon limits
+
+- The default paths are namespaced (`corvi-scalafx`), but they are still a shared directory: two users on one machine each get their own, two
+  *builds* of this spike on one account share one. `CORVI_HOST_SOCKET` exists for that.
+- The token file is created atomically at 0600 and the comparison is constant-time (`MessageDigest.isEqual`), but the token is a file: anything
+  that can read it can talk to the daemon. There is no rotation and no per-connection expiry.
+- `host.stop` ends the process rather than the connections one by one, so a client that is mid-request during a stop sees its socket close
+  (`Closed`) rather than an error reply. There is no idle exit: the daemon lives until stopped or killed.
+- A UI whose host dies is not reconnected automatically: `HostConnection.ensure` starts a new daemon when it runs, and `DaemonApp` does not
+  re-run it on `Closed` (the probe covers recovery, the window does not yet).
+- `host.log` is truncated on every spawn, so it holds one launch's output, not a history.
+- Spawn detachment is `java -cp` with redirected stdio and no handle kept; it does **not** call `setsid`, so a launcher that kills its whole
+  process group takes the daemon with it. A packaged app needs its own launcher.
+- Windows (TCP or a named pipe) is out of scope; only the transport seam would change.
+
 ### Renderer limits
 
 - Font metrics are measured once, from `Text("M")`/`Text("Mg")`: no re-measure on a DPI or font change, and a half-pixel cell width is
@@ -181,6 +196,45 @@ they start a real host.
   viewport coordinates, which stop meaning anything once the rows move (anchoring to absolute lines is what scrollback copying will need).
 - **Resize.** Debounced in the view (500 ms, 100 ms on the alternate screen) because the side that owns the window is the only one that knows
   whether the user is still dragging its edge; the host applies what it is told.
+
+## The daemon
+
+`corvi.host.HostMain` is the long-lived process: a `KyoApp` with no JavaFX that holds the shells and listens on a Unix domain socket. The UI
+connects to it; it does not own it.
+
+- **Transport.** `protocol.SocketWire` implements `kyo-jsonrpc`'s byte seam (`JsonRpcWireTransport`) over a blocking `SocketChannel`, and
+  `JsonRpcTransport.fromWire` lifts it with `JsonRpcFramer.contentLength`. Both directions park in blocking reads and writes on fibers — the
+  same blocking-FFI posture as the PTY reader, which is what `virtualizeWorkers` is for. The only thing the transport adds over the seam is a
+  `Latch` released on EOF, because the handler's dispatch fiber would otherwise wait for a stream that has already ended.
+- **Where it lives.** `$XDG_RUNTIME_DIR/corvi-scalafx/host.sock`, else `~/.local/state/corvi-scalafx/host.sock` — a name of its own, because
+  the installed Corvi app keeps its single-instance socket in `.../corvi` and this spike must never bind, replace or delete that one. The socket
+  and the token file next to it are both 0600 in a 0700 directory. `CORVI_HOST_SOCKET` overrides the socket (the token sits beside it), which is
+  how a probe runs a daemon without touching the user's own. The token is 32 random bytes, hex, created atomically at 0600 (`CREATE_NEW`, the
+  loser of a spawn race re-reads) and *reused*, so a UI that restarts reads the same file the daemon did.
+- **One instance, within its own family.** Binding the socket *is* the lock, and a `host.sock.owner` marker records which pid owns it. Before
+  binding, the daemon makes a non-blocking connect (500 ms deadline): a socket that answers means another host is running, and this one exits
+  with one line. A socket file whose marker names a dead pid is this daemon's own dead predecessor: socket and marker are removed and the path
+  is taken. A socket file with *no* marker is somebody else's — the installed app's — and is never unlinked.
+- **Connection lifetime.** Each connection runs in a scope of its own, in an *unscoped* fiber: the handler, the wire, the socket and the
+  client's registration all end with the connection, however it ends. The end is `SocketWire`'s latch, released from three sites — EOF from the
+  read, a read failure, and a local close — and `Latch` release is once-only, so the first wakes the connection's `await` and the rest are
+  no-ops. Reconnecting therefore costs the daemon nothing: the probe measures `lsof` before and after ten reconnects and allows a slack of two.
+- **Authorisation.** Every connection starts unauthorised. `host.hello(token)` is the only thing it can call; the session routes go through
+  `guarded`, which aborts with the typed `Unauthorized` until the token matched. This is per route rather than a `JsonRpcMessageGate` because a
+  gate's rejection carries the handshake request's id, and the caller would wait for an answer to a request it did make. The token comparison
+  is a plain `==`: this is a per-user door behind a 0600 socket, not a networked secret.
+- **Stopping.** `host.stop` ends the accept loop and lets the scope close: the sessions are released (LIFO), the socket and its owner marker
+  are unlinked, and the process exits. Connection handlers are **not** closed by the stop: a handler closing itself from inside its own request
+  deadlocks, and the process exit closes their sockets anyway. Closing the listener is what ends the accept loop's blocking `accept` — it works
+  because `ServerSocketChannel` is an `InterruptibleChannel`; a non-interruptible accept would leave the scope waiting for a connection that can
+  never come.
+- **Starting.** `HostConnection.ensure` (in `rendererApp`, not in `renderer`) connects, and if nothing answers spawns the daemon with this
+  JVM's own `java`, classpath and Kyo flags, its output appended to `host.log` beside the socket, its stdin `/dev/null`, and drops the handle:
+  nothing waits for it, nothing destroys it. Then it waits for the socket and says hello. The packaged app will need a launcher of its own;
+  `java -cp` is what a Mill-run UI can do.
+- **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. A second client can attach to the
+  same host at the same time; damage is pushed per client from that client's own baseline, so neither disturbs the other.
+- Windows (TCP or a named pipe) is out of scope; only the transport seam would change, not the routes or the lifecycle.
 
 ## Modules (Mill)
 

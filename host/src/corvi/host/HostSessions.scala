@@ -36,6 +36,15 @@ private[corvi] final class HostSessions private (
       else clients.set(current.updated(client, handler)).map(_ => true)
     }
 
+  /** Forgets a client that has gone: its handler is closed with its connection's scope, and its id must not be pushed to afterwards. */
+  def unbind(client: ClientId)(using Frame): Unit < Sync =
+    Sync.defer(forgetUnsafe(client))
+
+  /** The same from a scope finaliser, where an effect cannot be run. */
+  private[corvi] def forgetUnsafe(client: ClientId): Unit =
+    import AllowUnsafe.embrace.danger
+    val _ = clients.unsafe.updateAndGet(current => current - client)
+
   /** A fresh client id, unique per connection. */
   def nextClientId(using Frame): ClientId < Sync =
     lastClient.getAndIncrement.map(index => ClientId(s"client-${index + 1}"))

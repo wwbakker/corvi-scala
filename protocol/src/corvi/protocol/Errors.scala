@@ -18,6 +18,8 @@ object TerminalError:
   val SessionFailedCode: Int = 4002
   val SessionEndedCode: Int = 4003
   val ClientBoundCode: Int = 4004
+  val UnauthorizedCode: Int = 4005
+  val HostUnavailableCode: Int = 4006
 
 /** Asked for a session the host does not have, or one that has already been closed. */
 final case class UnknownSession(id: SessionId)(using Frame)
@@ -36,6 +38,13 @@ final case class SessionEnded(id: SessionId)(using Frame)
 /** A client id is already bound to this host. Host-side only: it never travels on the wire. */
 final case class ClientAlreadyBound(id: ClientId)(using Frame)
     extends TerminalError(TerminalError.ClientBoundCode, s"client '${id.value}' is already connected")
+
+/** A connection that has not said `host.hello` with the daemon's token cannot use the sessions. */
+final case class Unauthorized(reason: String)(using Frame) extends TerminalError(TerminalError.UnauthorizedCode, s"not authorized: $reason")
+
+/** The host could not be reached, and could not be started. A client-side failure the wire never carries. */
+final case class HostUnavailable(reason: String)(using Frame)
+    extends TerminalError(TerminalError.HostUnavailableCode, s"the host is not available: $reason")
 
 /** A wire error that is not one of the typed cases above, kept as the peer described it. */
 final case class RemoteError(override val code: Int, label: String)(using Frame) extends TerminalError(code, label)

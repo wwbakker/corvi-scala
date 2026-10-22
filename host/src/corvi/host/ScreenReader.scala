@@ -51,7 +51,7 @@ private[host] object ScreenReader:
     finally buffer.unlock()
 
   /** The session's metrics, read under the buffer's lock like everything else that reads the buffer. */
-  def info(id: SessionId, index: Int, buffer: TerminalTextBuffer, running: Boolean): SessionInfo =
+  def info(id: SessionId, index: Int, buffer: TerminalTextBuffer, running: Boolean, shellPid: Long): SessionInfo =
     buffer.lock()
     try
       SessionInfo(
@@ -59,7 +59,8 @@ private[host] object ScreenReader:
         index = index,
         size = TermSize(buffer.getWidth, buffer.getHeight),
         historyRows = buffer.getHistoryLinesCount,
-        running
+        running = running,
+        shellPid = shellPid
       )
     finally buffer.unlock()
 

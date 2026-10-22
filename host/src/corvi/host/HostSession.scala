@@ -51,7 +51,10 @@ private[corvi] final class HostSession private[host] (
 
   private val logger = LoggerFactory.getLogger(classOf[HostSession])
 
-  def info: SessionInfo = ScreenReader.info(id, index, buffer, process.isAlive)
+  /** The shell's process id, which is what a reattaching client compares to be sure it found the same shell. */
+  def shellPid: Long = process.pid()
+
+  def info: SessionInfo = ScreenReader.info(id, index, buffer, process.isAlive, shellPid = process.pid())
 
   /** The visible grid, the cursor, the modes, the history's depth and the theme, as one value, read at one instant. */
   def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display, theme)
