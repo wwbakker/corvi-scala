@@ -1,5 +1,6 @@
 package corvi.app
 
+import corvi.contract.LinkPolicy
 import java.util.logging.{LogRecord, Logger}
 import scalafx.application.JFXApp3
 import scalafx.application.JFXApp3.PrimaryStage
@@ -29,4 +30,6 @@ object ShellApp extends JFXApp3:
   override def start(): Unit =
     JFXApp3.AutoShow = false
     stage = new PrimaryStage
-    AppWindow(stage, java.lang.System.getProperty("user.dir")).connect()
+    // ScalaFX's HostServices wrapper has no showDocument; `delegate` is the public JavaFX HostServices instance.
+    val openLink: String => Unit = uri => if LinkPolicy.allows(uri) then hostServices.delegate.showDocument(uri)
+    AppWindow(stage, java.lang.System.getProperty("user.dir"), openLink = openLink).connect()

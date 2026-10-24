@@ -20,7 +20,13 @@ private[host] object ScreenReader:
     */
   private val palette = ColorPaletteImpl.XTERM_PALETTE
 
-  def snapshot(id: SessionId, buffer: TerminalTextBuffer, display: RecordingDisplay, theme: TerminalTheme): Snapshot =
+  def snapshot(
+      id: SessionId,
+      buffer: TerminalTextBuffer,
+      display: RecordingDisplay,
+      theme: TerminalTheme,
+      linkUri: TextStyle => Option[String]
+  ): Snapshot =
     buffer.lock()
     try
       val state: State = display.state
@@ -28,7 +34,7 @@ private[host] object ScreenReader:
       Snapshot(
         id = id,
         size = size,
-        rows = Vector.tabulate(size.rows)(y => row(buffer, y)),
+        rows = Vector.tabulate(size.rows)(y => row(buffer, y, linkUri)),
         cursor = Cursor(
           x = state.cursorX,
           // The engine's column is 0-based and its row is 1-based (`JediTerminal.cursorPosition` subtracts one from the
@@ -95,17 +101,23 @@ private[host] object ScreenReader:
   /** Rows from the scrollback, newest first: `from` counts back from the most recent history line (1-based), the same indexing
     * `TerminalTextBuffer.getLine` uses for negative indexes.
     */
-  def history(buffer: TerminalTextBuffer, from: Int, count: Int): Vector[Row] =
+  def history(
+      buffer: TerminalTextBuffer,
+      from: Int,
+      count: Int,
+      linkUri: TextStyle => Option[String]
+  ): Vector[Row] =
     buffer.lock()
     try
       val available = buffer.getHistoryLinesCount
-      Vector.tabulate(math.max(0, math.min(count, available - from + 1)))(i => rowOf(buffer, buffer.getLine(-from - i)))
+      Vector.tabulate(math.max(0, math.min(count, available - from + 1)))(i => rowOf(buffer, buffer.getLine(-from - i), linkUri))
     finally buffer.unlock()
 
-  private def row(buffer: TerminalTextBuffer, y: Int): Row = rowOf(buffer, buffer.getLine(y))
+  private def row(buffer: TerminalTextBuffer, y: Int, linkUri: TextStyle => Option[String]): Row =
+    rowOf(buffer, buffer.getLine(y), linkUri)
 
-  private def rowOf(buffer: TerminalTextBuffer, line: TerminalLine): Row =
-    Row(Vector.tabulate(buffer.getWidth)(x => cell(line, x)))
+  private def rowOf(buffer: TerminalTextBuffer, line: TerminalLine, linkUri: TextStyle => Option[String]): Row =
+    Row(Vector.tabulate(buffer.getWidth)(x => cell(line, x, linkUri)))
 
   /** One cell, line by line rather than through `getStyledCharAt`, which hands back a Kotlin `Pair` for two values the line already
     * carries. A cell with no style of its own carries none, and is drawn in the session's theme.
@@ -113,7 +125,7 @@ private[host] object ScreenReader:
     * The engine marks a double-width character by putting `CharUtils.DWC` in the cell after it, and stores a character outside the BMP as
     * its two surrogate halves in two cells; both become text plus a width here, so a client never has to know either convention.
     */
-  private def cell(line: TerminalLine, x: Int): Cell =
+  private def cell(line: TerminalLine, x: Int, linkUri: TextStyle => Option[String]): Cell =
     val style: TextStyle = Option(line.getStyleAt(x)).getOrElse(TextStyle.EMPTY)
     val raw = line.charAt(x)
     val next = line.charAt(x + 1)
@@ -131,7 +143,8 @@ private[host] object ScreenReader:
       bold = style.hasOption(TextStyle.Option.BOLD),
       italic = style.hasOption(TextStyle.Option.ITALIC),
       underline = style.hasOption(TextStyle.Option.UNDERLINED),
-      inverse = style.hasOption(TextStyle.Option.INVERSE)
+      inverse = style.hasOption(TextStyle.Option.INVERSE),
+      link = linkUri(style)
     )
 
   /** An indexed colour is resolved through the palette; an RGB one comes back unchanged. */

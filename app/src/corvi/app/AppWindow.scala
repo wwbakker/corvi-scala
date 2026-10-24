@@ -22,7 +22,8 @@ private[app] final class AppWindow(
     stage: Stage,
     cwd: String,
     altMode: AltMode = AltMode.configured,
-    initialFontSize: Double = TerminalFontSize.default
+    initialFontSize: Double = TerminalFontSize.default,
+    openLink: String => Unit = _ => ()
 ):
 
   /** The client this window owns, once the host has answered: closing the window stops its runtime but not the host. */
@@ -98,7 +99,7 @@ private[app] final class AppWindow(
 
   private def show(client: Client, sessions: Vector[SessionInfo]): Unit =
     connected.set(Some(client))
-    val factory = RendererViewFactory(client, initialFontSize, cwd, altMode)
+    val factory = RendererViewFactory(client, initialFontSize, cwd, altMode, openLink)
     val shell = ShellView(factory)
     mounted.set(Some(shell))
     val scene = new Scene(shell, 1180, 740)

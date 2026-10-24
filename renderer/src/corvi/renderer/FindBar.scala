@@ -18,6 +18,7 @@ private[corvi] final class FindBar extends HBox:
     getStyleClass.add("find-bar")
     setAlignment(Pos.CENTER_LEFT)
     setSpacing(6)
+    setPrefHeight(32)
     getChildren.addAll(field, status, previous, next, close)
     field.setPromptText("Find")
     field.setPrefColumnCount(24)

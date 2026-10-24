@@ -27,6 +27,7 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
       preedit: Option[Preedit],
       findMatches: Vector[TerminalSearch.Match],
       findCurrent: Option[Int],
+      hovered: Option[CellPosition],
       cursorOn: Boolean,
       focused: Boolean
   ): Unit =
@@ -40,6 +41,7 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
     val viewport = model.viewport
     val selected = selection.filterNot(_.isEmpty)
     val findSpans = findSpansFor(model, findMatches, findCurrent)
+    val hoveredLink = hovered.flatMap(position => model.row(position.row).cells.lift(position.col)).flatMap(_.link)
     val defaultBackground = theme.background
     for row <- 0 until math.min(model.rows, viewport.size) do
       val cells = viewport(row).cells
@@ -60,6 +62,11 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
           gc.fillRect(x, y, layout.cellWidth, layout.cellHeight)
         }
         if cell.text.nonEmpty && cell.text != " " then drawGlyph(gc, cell, x, y, style.foreground(cell, theme))
+        if hoveredLink.exists(uri => hovered.exists(_.row == row) && cell.link.contains(uri)) then
+          gc.setStroke(style.cursor)
+          gc.setLineWidth(1)
+          val width = layout.cellWidth * (if cell.width == CellWidth.Wide then 2 else 1)
+          gc.strokeLine(x, y + layout.cellHeight - 1.5, x + width, y + layout.cellHeight - 1.5)
 
     // The cursor belongs to the live grid. Scrolled back, the rows under it are history, and a block drawn over them would point at a cell
     // the terminal is not on.

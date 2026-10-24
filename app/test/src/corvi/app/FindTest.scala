@@ -78,8 +78,13 @@ final class FindTest:
 
   @Test
   def `the find bar takes rows, requests a resize and restores them on close`(): Unit =
-    val terminal = view.get().getOrElse(fail("no terminal"))
-    onFx(terminal.clearFind())
+    // An unattached view with an explicit size: this measures the bar's own extent, not whatever size a window manager gave the stage.
+    val terminal = onFx {
+      val created = TerminalPane(calls, SessionId("find-layout"), TerminalMetrics.monospaced(13))
+      created.attached(snapshot(Vector("alpha beta"), historyRows = 0, id = created.session))
+      created.resize(640, 320)
+      created
+    }
     calls.reset()
     val before = onFx(terminal.contentGrid.rows)
     onFx(terminal.openFind())
@@ -88,6 +93,7 @@ final class FindTest:
     assertTrue(await(() => calls.resizes.nonEmpty, 3000), "opening the bar asks the host for a new grid")
     onFx(terminal.clearFind())
     assertEquals(before, onFx(terminal.contentGrid.rows), "closing the bar gives the rows back")
+    onFx(terminal.dispose())
 
   @Test
   def `a history update keeps the current match index`(): Unit =

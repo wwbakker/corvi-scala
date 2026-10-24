@@ -16,7 +16,8 @@ private[app] final class RendererViewFactory(
     client: Client,
     initialFontSize: Double,
     cwd: String,
-    altMode: AltMode = AltMode.configured
+    altMode: AltMode = AltMode.configured,
+    openLink: String => Unit = _ => ()
 ) extends TerminalViewFactory[JfxNode]:
 
   /** The current metrics are runtime state, shared by every view this factory opens. */
@@ -28,7 +29,7 @@ private[app] final class RendererViewFactory(
   private val defaultGrid: TermSize = TermSize(cols = 100, rows = 28)
 
   def open(info: SessionInfo, onActivity: () => Unit, onEnded: Ended => Unit): ShellView[JfxNode] =
-    val inner = TerminalView(client, info.id, metrics, altMode)
+    val inner = TerminalView(client, info.id, metrics, altMode, openLink)
     // Plugged before it asks for its snapshot: the host's first damage can otherwise arrive while the view is still absent from the sink.
     client.sink.plug(inner)
     inner.onOutput(onActivity)

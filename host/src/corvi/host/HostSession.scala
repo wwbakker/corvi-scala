@@ -60,10 +60,10 @@ private[corvi] final class HostSession private[host] (
     ScreenReader.info(id, index, buffer, running, shellPid = process.pid(), ended = ended)
 
   /** The visible grid, the cursor, the modes, the history's depth and the theme, as one value, read at one instant. */
-  def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display, theme)
+  def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display, theme, terminal.uriFor)
 
   /** Rows from the scrollback, newest first, `from` counting back from the most recent (1-based). */
-  def history(from: Int, count: Int): Vector[Row] = ScreenReader.history(buffer, from, count)
+  def history(from: Int, count: Int): Vector[Row] = ScreenReader.history(buffer, from, count, terminal.uriFor)
 
   /** The frame as it is now, and the delta from `before` to it. One read, so the two describe the same instant: taking a snapshot and
     * diffing against it separately would compare a frame with itself when output arrives in between.

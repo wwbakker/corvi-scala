@@ -76,11 +76,11 @@ failure.
 ./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
 ./mill -i ui.test                                       # 49 JUnit tests: ShellState transitions, chords, font preference
-./mill -i renderer.test                                 # 49 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit, search
+./mill -i renderer.test                                 # 51 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit, search, links
 ./mill -i host.test                                     # JUnit tests: registry, binds, key/mouse/focus/paste input
 ./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
-./mill -i host.test.runMain corvi.host.HostProbe        # 52 checks: PTY, VT emulation, keys, snapshot/damage, history, resize
-./mill -i host.test.runMain corvi.host.ProtocolProbe    # 32 checks: routes, typed errors, auth, pushes, reconnects
+./mill -i host.test.runMain corvi.host.HostProbe        # 58 checks: PTY, VT emulation, keys, links, snapshot/damage, history, resize
+./mill -i host.test.runMain corvi.host.ProtocolProbe    # 33 checks: routes, typed errors, links, auth, pushes, reconnects
 ./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
 ./mill -i app.test.runMain corvi.app.RendererProbe      # 39 checks: the renderer, paste, IME, font size, find, selection, scrollback, captures
 ./mill -i app.test.runMain corvi.app.UiProbe            # 33 checks: the window, tabs, chords, font size, find, bells, menus, drag
@@ -138,6 +138,7 @@ for this code base is the first-party skill in [`.agents/skills/kyo-scala/`](.ag
 | `⌘=` / `ctrl-shift-=` | increase terminal font size |
 | `⌘-` / `ctrl-shift--` | decrease terminal font size |
 | `⌘0` / `ctrl-shift-0` | reset terminal font size |
+| `⌘-click` (macOS) / `ctrl-click` | open an OSC 8 `http`, `https` or `file` link |
 
 ### Keys
 
@@ -168,8 +169,7 @@ no keypad digits or Enter.
 **Paste is bracketed when the program asks for it.** If the current frame has `2004` enabled, the clipboard is sent as
 `ESC[200~ <clipboard> ESC[201~`; otherwise the clipboard is sent unchanged, so a shell without bracketed paste keeps the old behaviour.
 The text is not inspected or rewritten, and in that mode a multi-line paste is one paste rather than one command per line. The wrapping
-decision comes from the last frame, so a paste racing a `2004` disable can send the bracket markers as literal text. Not implemented,
-deliberately: hyperlinks and `⌘-click`.
+decision comes from the last frame, so a paste racing a `2004` disable can send the bracket markers as literal text.
 
 **Mouse reports are forwarded** when the program asks for them (`1000`, `1001`, `1002`, `1003`): clicks, drags, the vertical and horizontal
 wheel, and the back/forward buttons are encoded by the host in the session's format (`1005`, `1006`, `1015` or X10), so a TUI such as Pi
@@ -191,6 +191,11 @@ ending the session drops its query and highlights. There is no regex and no sear
 **Font size is a window preference.** The chords above re-measure every mounted terminal on the FX thread, replace its canvas, keep the
 model, selection and scrollback position, and ask the host for a grid that fits the new metrics. New tabs inherit the current size. It is
 runtime state only until a settings layer exists. See [docs/find-and-font.md](docs/find-and-font.md).
+
+**OSC 8 links are explicit and restricted.** The host records the URI the engine passes to `setLinkUriStarted`; only `http`, `https` and
+`file` targets reach a cell. The renderer underlines a link under the pointer and changes the cursor to a hand, and `⌘-click` on macOS or
+`ctrl-click` elsewhere asks the app to open it. The app validates the scheme again before calling `HostServices.showDocument`; URL
+auto-detection and editor/file-line links are later work. See [docs/hyperlinks.md](docs/hyperlinks.md).
 
 ## Where the state lives
 
@@ -300,7 +305,8 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **No hyperlinks** in the renderer.
+- **Links are explicit OSC 8 only.** Plain URLs in output are not auto-detected; `http`, `https` and `file` are the only schemes opened,
+  and opening is a platform click with `⌘`/`ctrl`.
 - **Find is literal only.** It searches the loaded history plus the live grid, with no regex or future output; the first query asks for
   all history the host currently has. Matches are refreshed on history arrivals, not on every live-frame change.
 - **Font size is runtime state.** It is not persisted and has no settings UI; all views in the window share it.

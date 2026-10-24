@@ -188,6 +188,7 @@ object ProtocolProbe:
       keyHex = keyed.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
       _ = reporter.report("keys over the wire are encoded by the host", keyHex.contains("1b5b411b61"), keyHex.takeRight(30))
       _ <- focusWireCheck(client, cache, id, reporter)
+      _ <- linkWireCheck(client, cache, id, reporter)
     yield ()
 
   /** The focus route with 1004 enabled, so the host has a reason to write the two reports into the raw reader. */
@@ -205,6 +206,20 @@ object ProtocolProbe:
       focused <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("FOCUS_DONE"))
       focusHex = focused.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
       _ = reporter.report("focus events over the wire are encoded by the host", focusHex.contains("1b5b491b5b4f"), focusHex.takeRight(30))
+    yield ()
+
+  /** An OSC 8 link has to survive the frame/damage codec, not only the host's in-process snapshot. */
+  private def linkWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command = "printf '\\033]8;;https://example.com\\007WIRELINK\\033]8;;\\007\\n'\n"
+    for
+      _ <- client.text(id, command)
+      linked <- awaitFrame(cache, id)(frame => frame.rows.exists(_.cells.exists(_.link.contains("https://example.com"))))
+      link = linked match
+        case Maybe.Present(frame) => frame.rows.flatMap(_.cells).flatMap(_.link).headOption
+        case Maybe.Absent         => None
+      _ = reporter.report("an OSC 8 link survives the frame codec", link.contains("https://example.com"), link.getOrElse("no link"))
     yield ()
 
   /** A height-only resize (where the rows that survive must not be blanked), a shrink, and history. */

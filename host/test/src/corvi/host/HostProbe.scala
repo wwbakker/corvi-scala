@@ -39,6 +39,7 @@ object HostProbe:
     for
       session <- HostSession.open(SessionId("probe"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
       _ <- screenChecks(session, reporter)
+      _ <- linkChecks(session, reporter)
       _ <- sizeAndScrollbackChecks(session, reporter)
       _ <- modeChecks(session, reporter)
       _ <- focusModeChecks(session, reporter)
@@ -154,6 +155,55 @@ object HostProbe:
       )
     yield ()
 
+  /** OSC 8 links: the engine keeps only an opaque LinkInfo, so the host records the URI beside the resulting HyperlinkStyle. */
+  private def linkChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
+    val report = reporter.report
+    for
+      _ = session.write("printf '\\033]8;;https://example.com\\007LINKED\\033]8;;\\007\\n'\n")
+      linked <- await(session)(snapshot => cellOf(snapshot, "LINKED").flatMap(_.link).contains("https://example.com"))
+      _ = report(
+        "an OSC 8 link is carried on its cells",
+        cellOf(linked, "LINKED").flatMap(_.link).contains("https://example.com"),
+        cellOf(linked, "LINKED").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write("printf '\\033]8;;javascript:alert(1)\\007UNSAFE\\033]8;;\\007\\n'\n")
+      unsafe <- await(session)(snapshot => lines(snapshot).contains("UNSAFE"))
+      _ = report(
+        "an unsafe OSC 8 scheme is not exposed",
+        cellOf(unsafe, "UNSAFE").flatMap(_.link).isEmpty,
+        cellOf(unsafe, "UNSAFE").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write("printf '\\033]8;;https://example.org/other\\007OTHER\\033]8;;\\007\\n'\n")
+      other <- await(session)(snapshot => cellOf(snapshot, "OTHER").flatMap(_.link).contains("https://example.org/other"))
+      _ = report(
+        "two links with the same style keep their own URIs",
+        cellOf(other, "OTHER").flatMap(_.link).contains("https://example.org/other") &&
+          cellOf(other, "LINKED").flatMap(_.link).contains("https://example.com"),
+        s"LINKED ${cellOf(other, "LINKED").flatMap(_.link)}, OTHER ${cellOf(other, "OTHER").flatMap(_.link)}"
+      )
+
+      _ = session.write("printf '\\033]8;;https://example.com/bold\\007\\033[1;31mBOLDLINK\\033]8;;\\007\\n'\n")
+      boldLink <- await(session)(snapshot => cellOf(snapshot, "BOLDLINK").flatMap(_.link).contains("https://example.com/bold"))
+      _ = report(
+        "bold and colour inside a link keep its URI",
+        cellOf(boldLink, "BOLDLINK").flatMap(_.link).contains("https://example.com/bold"),
+        cellOf(boldLink, "BOLDLINK").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write(
+        "printf '\\033]8;;https://example.com/reset\\007\\033[1mBEFORE\\033[0mAFTER\\033]8;;\\007\\n'\n"
+      )
+      resetLink <- await(session)(snapshot => cellOf(snapshot, "AFTER").flatMap(_.link).contains("https://example.com/reset"))
+      _ = report(
+        "an SGR reset inside a link keeps its URI",
+        cellOf(resetLink, "AFTER").flatMap(_.link).contains("https://example.com/reset") &&
+          cellOf(resetLink, "BEFORE").flatMap(_.link).contains("https://example.com/reset"),
+        s"BEFORE ${cellOf(resetLink, "BEFORE").flatMap(_.link)}, AFTER ${cellOf(resetLink, "AFTER").flatMap(_.link)}"
+      )
+    yield ()
+
   /** The grid's size, the scrollback, its cap, and reading both while output floods in. */
   private def sizeAndScrollbackChecks(session: HostSession, reporter: Reporter)(using
       Frame
@@ -186,6 +236,12 @@ object HostProbe:
         "and adjacent pages do not overlap",
         contiguous && pageOneNumbers.intersect(pageTwoNumbers).isEmpty,
         s"${pageOneNumbers.lastOption.getOrElse("?")} | ${pageTwoNumbers.headOption.getOrElse("?")}"
+      )
+      linkedHistory = session.history(from = 1, count = 400)
+      _ = report(
+        "a scrollback row keeps its link",
+        linkedHistory.exists(row => row.cells.exists(_.link.contains("https://example.com"))),
+        linkedHistory.flatMap(_.cells).flatMap(_.link).distinct.mkString(" ")
       )
 
       // A resize keeps the scrollback that was already there.

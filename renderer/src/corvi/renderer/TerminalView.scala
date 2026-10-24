@@ -5,6 +5,7 @@ import corvi.protocol.*
 import javafx.animation.PauseTransition
 import javafx.application.Platform
 import javafx.geometry.{Insets, Orientation, Point2D}
+import javafx.scene.Cursor
 import javafx.scene.control.ScrollBar
 import javafx.scene.input.{
   Clipboard,
@@ -33,8 +34,13 @@ import scala.util.Try
   * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
   * full-screen program repainting on every step would be the expensive part.
   */
-final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics, altMode: AltMode = AltMode.configured)
-    extends BorderPane
+final class TerminalView(
+    calls: SessionCalls,
+    val session: SessionId,
+    metrics: TerminalMetrics,
+    altMode: AltMode = AltMode.configured,
+    openLink: String => Unit = _ => ()
+) extends BorderPane
     with FrameSink
     with SessionEvents:
 
@@ -63,6 +69,9 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
   private var findIndex: Int = -1
   private var findHistoryRequestedFor: Option[Int] = None
+
+  private val linkModifierIsControl: Boolean =
+    !Option(java.lang.System.getProperty("os.name")).getOrElse("").toLowerCase.contains("mac")
 
   /** An Alt+printable press was sent as a Meta key, so its typed companion is not a character. It is cleared by that companion, or by the
     * next press when the platform sends none.
@@ -208,16 +217,25 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       override def getSelectedText(): String = null)
     val _ = setOnMousePressed(event =>
       requestFocus()
-      terminalButton(event.getButton) match
-        case Some(button) if reportingMode.nonEmpty && !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
-          pressedTerminalButton = Some(button)
-          sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+      val link =
+        if linkModifier(event) && event.getButton == JfxMouseButton.PRIMARY && insideCanvas(event.getX, event.getY) then
+          canvas.linkAt(event.getX, event.getY)
+        else None
+      link match
+        case Some(target) =>
           event.consume()
-        case _ if event.getButton == JfxMouseButton.PRIMARY =>
-          pressedTerminalButton = None
-          selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
-          redraw()
-        case _ => ()
+          openLink(target)
+        case None =>
+          terminalButton(event.getButton) match
+            case Some(button) if reportingMode.nonEmpty && !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
+              pressedTerminalButton = Some(button)
+              sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+              event.consume()
+            case _ if event.getButton == JfxMouseButton.PRIMARY =>
+              pressedTerminalButton = None
+              selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
+              redraw()
+            case _ => ()
     )
     val _ = setOnMouseDragged(event =>
       if reportingMode.nonEmpty && forcesSelection(event) then
@@ -239,6 +257,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
             redraw()
     )
     val _ = setOnMouseMoved(event =>
+      updateHover(event.getX, event.getY)
       reportingMode match
         case Some(MouseMode.AnyMotion)
             if pressedTerminalButton.isEmpty && !forcesSelection(event) &&
@@ -247,6 +266,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
           event.consume()
         case _ => ()
     )
+    val _ = setOnMouseExited(_ => clearHover())
     val _ = setOnMouseReleased(event =>
       pressedTerminalButton match
         case Some(button) =>
@@ -665,6 +685,21 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       model = Some(next)
       updateScrollbar(next)
     }
+
+  private def linkModifier(event: javafx.scene.input.MouseEvent): Boolean =
+    if linkModifierIsControl then event.isControlDown else event.isMetaDown
+
+  private def updateHover(x: Double, y: Double): Unit =
+    val position = if insideCanvas(x, y) && canvas.linkAt(x, y).nonEmpty then Some(canvas.positionAt(x, y)) else None
+    canvas.setHover(position)
+    setCursor(if position.isDefined then Cursor.HAND else Cursor.DEFAULT)
+
+  private def clearHover(): Unit =
+    canvas.setHover(None)
+    setCursor(Cursor.DEFAULT)
+
+  /** The link under the pointer, for the hover/click test. */
+  private[corvi] def hoveredLink: Option[String] = canvas.hoveredLink
 
   // --- pointer encoding -------------------------------------------------------------------------------------------------------------
 

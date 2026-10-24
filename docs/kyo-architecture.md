@@ -226,6 +226,9 @@ they start a real host.
   the session clears it.
 - **Font size.** The window owns one runtime size preference. A chord re-measures every mounted view, replaces its canvas while keeping
   the model, selection and scrollback offset, and asks the host for a grid that fits; the factory uses the new size for later tabs.
+- **Links.** `Cell.link` is a sparse per-cell OSC 8 target. The host stores the URI in a `UriLinkInfo` on the `HyperlinkStyle`, so styles the
+  engine derives after SGR changes keep the target; the renderer underlines the hovered link run and changes the cursor, and `⌘`/`ctrl`-click
+  calls an app-supplied opener after a second scheme check.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
@@ -411,7 +414,7 @@ The UI is testable with a fake `TerminalViewFactory`; the host and renderer are 
 
 ## Non-goals for now
 
-Host restart survival, remote hosts, hyperlinks (renderer follow-up), Windows transport.
+Host restart survival, remote hosts, URL auto-detection and editor/file-line links, Windows transport.
 
 ## Limits
 

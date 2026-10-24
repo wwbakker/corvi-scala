@@ -1,5 +1,6 @@
 package corvi.renderer
 
+import corvi.contract.LinkPolicy
 import javafx.animation.{Animation, KeyFrame, Timeline}
 import javafx.scene.canvas.Canvas
 import javafx.util.Duration
@@ -18,6 +19,7 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
   private var preedit: Option[Preedit] = None
   private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
   private var findIndex: Option[Int] = None
+  private var hovered: Option[CellPosition] = None
   private var cursorOn: Boolean = true
   private var blinkOverride: Option[Boolean] = None
   private var baseFocus: Boolean = false
@@ -53,6 +55,27 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     findMatches = matches
     findIndex = current
     repaint()
+
+  /** The cell the pointer is over, if it carries an allowed link; the painter underlines the link run. */
+  def setHover(position: Option[CellPosition]): Unit =
+    if position != hovered then
+      hovered = position
+      repaint()
+
+  /** The explicit link at a canvas point, with unsafe schemes refused here as well as at the opener. */
+  def linkAt(x: Double, y: Double): Option[String] =
+    shown.flatMap { model =>
+      val position = positionAt(x, y)
+      model.row(position.row).cells.lift(position.col).flatMap(_.link).filter(LinkPolicy.allows)
+    }
+
+  /** For the hover/click tests. */
+  private[corvi] def hoveredLink: Option[String] =
+    for
+      model <- shown
+      position <- hovered
+      link <- model.row(position.row).cells.lift(position.col).flatMap(_.link).filter(LinkPolicy.allows)
+    yield link
 
   /** Blinking, or its absence, as an override: the frame can ask for blinking on every damage and this still wins. */
   def setBlinking(enabled: Boolean): Unit =
@@ -98,6 +121,7 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
         preedit,
         findMatches,
         findIndex,
+        hovered,
         cursorOn,
         focusOverride.getOrElse(baseFocus)
       )
