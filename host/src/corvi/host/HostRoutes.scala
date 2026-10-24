@@ -45,6 +45,7 @@ private[corvi] object HostRoutes:
       JsonRpcRoute.request[TextParams, Unit](Methods.Text)((params, _) => guarded(connection)(host.text(params.id, params.text))),
       JsonRpcRoute.request[MouseParams, Unit](Methods.Mouse)((params, _) => guarded(connection)(host.mouse(params.id, params.input))),
       JsonRpcRoute.request[KeyParams, Unit](Methods.Key)((params, _) => guarded(connection)(host.key(params.id, params.input))),
+      JsonRpcRoute.request[FocusParams, Unit](Methods.Focus)((params, _) => guarded(connection)(host.focus(params.id, params.focused))),
       JsonRpcRoute.request[ResizeParams, Unit](Methods.Resize)((params, _) => guarded(connection)(host.resize(params.id, params.size)))
     ).map(route =>
       route

@@ -4,7 +4,7 @@ package corvi.contract
   * sends.
   */
 enum MouseButton derives CanEqual:
-  case Left, Middle, Right, WheelUp, WheelDown, WheelLeft, WheelRight
+  case Left, Middle, Right, WheelUp, WheelDown, WheelLeft, WheelRight, Back, Forward
 
 /** What happened to the pointer. A wheel notch is a press-and-release in the protocol, but the terminal only wants one report for it, so it
   * is modelled as `Press`; a pointer move that is not a drag carries no button.

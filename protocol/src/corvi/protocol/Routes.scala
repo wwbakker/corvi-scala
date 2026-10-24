@@ -17,6 +17,7 @@ object Methods:
   val Text: String = "session.text"
   val Mouse: String = "session.mouse"
   val Key: String = "session.key"
+  val Focus: String = "session.focus"
   val Resize: String = "session.resize"
   val Damage: String = "session.damage"
   val Ended: String = "session.ended"

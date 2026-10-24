@@ -90,6 +90,7 @@ final class PendingDamageTest:
     def text(session: SessionId, text: String): Unit = ()
     def mouse(session: SessionId, input: corvi.contract.MouseInput): Unit = ()
     def key(session: SessionId, input: corvi.contract.KeyInput): Unit = ()
+    def focus(session: SessionId, focused: Boolean): Unit = ()
     def resize(session: SessionId, size: TermSize): Unit = ()
     def history(session: SessionId, from: Int, count: Int): Unit = ()
     def close(session: SessionId): Unit = ()

@@ -5,6 +5,7 @@ import corvi.renderer.*
 import corvi.renderer.TerminalView as TerminalPane
 import corvi.host.HostSession
 import java.awt.image.BufferedImage
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
@@ -12,7 +13,7 @@ import javafx.application.Platform
 import javafx.event.Event
 import javafx.scene.Scene
 import javafx.scene.image.WritableImage
-import javafx.scene.input.ScrollEvent
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, ScrollEvent}
 import javafx.stage.Stage
 import javax.imageio.ImageIO
 import kyo.Duration
@@ -84,6 +85,7 @@ object RendererProbe:
       }
       paintChecks(view, scene, layout, reporter)
       damageChecks(view, scene, layout, reporter)
+      pasteChecks(view, reporter)
       selectionChecks(view, reporter)
       wideChecks(view, scene, layout, reporter)
       resizeChecks(view, stage.get, layout, reporter)
@@ -215,6 +217,51 @@ object RendererProbe:
       painted * 2 > cursorCells(layout),
       s"cursor ${cursor}, $painted of ${cursorCells(layout)} pixels in the cell"
     )
+
+  /** A real shell reading raw bytes: the paste chord must send one bracketed sequence, not the clipboard as commands. */
+  private def pasteChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    val pasted = "one\ntwo"
+    val wrapped = s"\u001b[200~$pasted\u001b[201~"
+    val bytes = wrapped.getBytes(StandardCharsets.UTF_8)
+    val expectedHex = bytes.map(byte => f"${byte & 0xff}%02x").mkString
+    val saved = onFx(Option(Clipboard.getSystemClipboard().getString))
+    try
+      onFx {
+        val content = ClipboardContent()
+        content.putString(pasted)
+        val _ = Clipboard.getSystemClipboard().setContent(content)
+      }
+      onFx(
+        view.typeText(
+          s"printf '\\033[?2004h'; stty raw -echo; printf 'PASTE_%s\\n' READY; " +
+            s"dd bs=1 count=${bytes.length} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+            "printf '\\nPASTE_%s\\n' DONE; printf '\\033[?2004l'; stty sane\n"
+        )
+      )
+      val ready = poll(waitTimeout)(
+        onFx(view.frame).exists(frame => frame.modes.bracketedPaste && normalized(frame).contains("PASTE_READY"))
+      )
+      if ready then
+        onFx(
+          Event.fireEvent(
+            view,
+            new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.V, true, true, false, false)
+          )
+        )
+      val done = ready && poll(waitTimeout)(onFx(view.frame).exists(frame => normalized(frame).contains("PASTE_DONE")))
+      val received = onFx(view.frame).map(normalized).getOrElse("")
+      report(
+        "a multiline paste in bracketed-paste mode is one bracketed sequence",
+        done && received.contains(expectedHex),
+        s"bracketed mode $ready, expected $expectedHex, screen ${received.takeRight(100)}"
+      )
+    finally
+      onFx {
+        val content = ClipboardContent()
+        saved.foreach(value => content.putString(value))
+        val _ = Clipboard.getSystemClipboard().setContent(content)
+      }
 
   /** Selection over the visible cells, and the text a copy would put on the clipboard. */
   private def selectionChecks(view: TerminalPane, reporter: Reporter): Unit =
@@ -552,6 +599,9 @@ object RendererProbe:
   // --- helpers -----------------------------------------------------------------------------------------------------------------------
 
   private def lines(frame: corvi.contract.Frame): Vector[String] = frame.rows.map(row => row.cells.map(_.text).mkString.trim)
+
+  private def normalized(frame: corvi.contract.Frame): String =
+    frame.rows.map(row => row.cells.map(_.text).mkString).mkString.filterNot(_.isWhitespace)
 
   private def rowsOf(model: ScreenModel): Vector[String] = (0 until model.rows).map(model.rowText).toVector
 

@@ -107,6 +107,14 @@ private[corvi] final class HostSession private[host] (
   def key(input: KeyInput): Unit =
     KeyEncoder.encode(input, terminal.codeForKey).foreach(bytes => connector.write(bytes))
 
+  /** Reports the window's focus only while the program asked for `1004`; every other mode ignores the transition. The host tracks 1004
+    * separately from the mouse mode because a program may enable both. `MouseMode.Focus` here is only the encoder's name for the enabled
+    * state; the display's mouse mode never carries it.
+    */
+  def focus(focused: Boolean): Unit =
+    val mode = if display.state.focusReporting then MouseMode.Focus else MouseMode.Off
+    FocusEncoder.encode(focused, mode).foreach(bytes => connector.write(bytes))
+
   /** Sends a pointer event in the session's current tracking mode. The mode is read from the display at the moment the event arrives, so a
     * program that enables SGR or switches from click to any-motion tracking gets the encoding it asked for.
     */
@@ -127,7 +135,10 @@ private[corvi] final class HostSession private[host] (
     * take the host's other sessions down with it.
     */
   private[host] def drive(): Unit =
-    val stream = new TtyBasedArrayDataStream(connector)
+    val stream = new FocusTrackingDataStream(
+      new TtyBasedArrayDataStream(connector),
+      enabled => display.setFocusReporting(enabled)
+    )
     val emulator = new JediEmulator(stream, terminal)
     try while emulator.hasNext do emulator.next()
     catch

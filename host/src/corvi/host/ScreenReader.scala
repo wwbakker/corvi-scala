@@ -43,7 +43,8 @@ private[host] object ScreenReader:
           mouseMode = state.mouseMode,
           mouseFormat = state.mouseFormat,
           bracketedPaste = state.bracketedPaste,
-          title = state.title
+          title = state.title,
+          focusReporting = state.focusReporting
         ),
         historyRows = buffer.getHistoryLinesCount,
         theme = theme

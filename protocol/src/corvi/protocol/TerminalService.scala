@@ -32,6 +32,7 @@ private[corvi] trait TerminalService:
   def text(id: SessionId, text: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+  def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
 
@@ -79,6 +80,9 @@ private[corvi] final class TerminalClient(handler: JsonRpcHandler) extends Termi
 
   def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[KeyParams, Unit](Methods.Key, KeyParams(id, input)))
+
+  def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[FocusParams, Unit](Methods.Focus, FocusParams(id, focused)))
 
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[ResizeParams, Unit](Methods.Resize, ResizeParams(id, size)))

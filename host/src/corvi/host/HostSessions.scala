@@ -122,6 +122,9 @@ private[corvi] final class HostSessions private (
   def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.key(input))
 
+  def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
+    live(id).map(managed => managed.session.focus(focused))
+
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.resize(size))
 

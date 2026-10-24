@@ -25,6 +25,9 @@ object Messages:
   /** `session.key`: one non-text key, for the host to encode in the session's current key modes. */
   final case class KeyParams(id: SessionId, input: KeyInput) derives Schema, CanEqual
 
+  /** `session.focus`: the window gained or lost the keyboard, for a program that asked for `1004` reports. */
+  final case class FocusParams(id: SessionId, focused: Boolean) derives Schema, CanEqual
+
   /** `session.resize`: the grid the client wants. */
   final case class ResizeParams(id: SessionId, size: TermSize) derives Schema, CanEqual
 

@@ -37,6 +37,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
   /** The same for `session.key`, so an older daemon does not report once per arrow key. */
   private val keyUnavailable: AtomicBoolean = new AtomicBoolean(false)
 
+  /** The same for `session.focus`, so an older daemon does not report once per focus change. */
+  private val focusUnavailable: AtomicBoolean = new AtomicBoolean(false)
+
   /** A new session at this grid, delivered on the FX thread: `None` when the host refused, and nothing is shown until it arrives. */
   def create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit): Unit =
     offer(Command.Create(cwd, size, onCreated))
@@ -55,6 +58,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   def key(session: SessionId, input: KeyInput): Unit =
     if !keyUnavailable.get() then offer(Command.Key(session, input))
+
+  def focus(session: SessionId, focused: Boolean): Unit =
+    if !focusUnavailable.get() then offer(Command.Focus(session, focused))
 
   def resize(session: SessionId, size: TermSize): Unit = offer(Command.Resize(session, size))
 
@@ -98,6 +104,10 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
           case Some(Command.Key(_, _)) if keyUnavailable.get() => Sync.defer((events, false))
           case Some(Command.Key(id, input))                    =>
             performedCapability(events.get(id), "key", keyUnavailable, unsupportedKey)(service.key(id, input))
+              .map(_ => (events, false))
+          case Some(Command.Focus(_, _)) if focusUnavailable.get() => Sync.defer((events, false))
+          case Some(Command.Focus(id, focused))                    =>
+            performedCapability(events.get(id), "focus", focusUnavailable, unsupportedFocus)(service.focus(id, focused))
               .map(_ => (events, false))
           case Some(Command.Resize(id, size)) =>
             perform(events.get(id), "resize")(service.resize(id, size)).map(_ => (events, false))
@@ -180,6 +190,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   private val unsupportedMouse: String = "the host does not support mouse reports; restart it to load session.mouse"
   private val unsupportedKey: String = "the host does not support key input; restart it to load session.key"
+  private val unsupportedFocus: String = "the host does not support focus reports; restart it to load session.focus"
 
   /** A route the host may predate is reported once when it is missing, not once per event: an old daemon would otherwise print on every
     * pointer move or arrow key while a TUI is running.
@@ -200,7 +211,8 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
               report(unsupported)
               events.foreach(target => onFx(() => target.failed(unsupported)))
           }
-        case Result.Failure(error) =>
+        case Result.Failure(error) if sessionGone(error) => Sync.defer(())
+        case Result.Failure(error)                       =>
           Sync.defer {
             report(s"$label failed: $error")
             events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
@@ -244,6 +256,7 @@ private[app] object Client:
     case Text(session: SessionId, text: String)
     case Mouse(session: SessionId, input: MouseInput)
     case Key(session: SessionId, input: KeyInput)
+    case Focus(session: SessionId, focused: Boolean)
     case Resize(session: SessionId, size: TermSize)
     case History(session: SessionId, from: Int, count: Int)
 

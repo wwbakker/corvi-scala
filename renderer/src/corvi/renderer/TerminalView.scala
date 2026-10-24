@@ -107,7 +107,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = scrollbar.managedProperty().bind(scrollbar.visibleProperty())
     // The scrollbar runs the other way round from the model: its bottom is the live grid, because that is where a scrollbar's "end" is.
     val _ = scrollbar.valueProperty().addListener((_, _, value) => scrollTo(math.round(scrollbar.getMax() - value.doubleValue()).toInt))
-    val _ = focusedProperty().addListener((_, _, focused) => canvas.setBaseFocus(focused))
+    val _ = focusedProperty().addListener((_, _, focused) => focusChanged(focused))
     val _ = widthProperty().addListener((_, _, _) => scheduleResize())
     val _ = heightProperty().addListener((_, _, _) => scheduleResize())
     // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
@@ -211,11 +211,17 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = setOnScroll((event: ScrollEvent) =>
       reportingMode match
         case Some(_) if !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
-          if event.getDeltaY != 0 then
-            val button = if event.getDeltaY > 0 then MouseButton.WheelUp else MouseButton.WheelDown
-            sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+          val button =
+            if event.getDeltaX != 0 then Some(if event.getDeltaX > 0 then MouseButton.WheelRight else MouseButton.WheelLeft)
+            else if event.getDeltaY != 0 then Some(if event.getDeltaY > 0 then MouseButton.WheelUp else MouseButton.WheelDown)
+            else None
+          button.foreach { wheel =>
+            sendMouse(event.getX, event.getY, Some(wheel), MouseAction.Press, event)
             event.consume()
-        case _ => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel)
+          }
+        case _ =>
+          // A horizontal-only wheel event has nothing to scroll in this viewport; do not treat its zero deltaY as "down".
+          if event.getDeltaY != 0 then scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel)
     )
     resizeTimer.setOnFinished(_ => requestGridForSize())
 
@@ -272,10 +278,23 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       }.failed.foreach(error => report(s"the clipboard refused the selection: $error"))
     copied
 
-  /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. */
+  /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. When the program enabled
+    * bracketed paste, the text is wrapped and otherwise untouched; without it, the previous plain-text behaviour is the fallback.
+    */
   def pasteClipboard(): Unit =
     val pasted = Try(Option(Clipboard.getSystemClipboard().getString)).toOption.flatten.getOrElse("")
-    if end.isEmpty && pasted.nonEmpty then calls.text(session, pasted)
+    if end.isEmpty && pasted.nonEmpty then
+      val wrapped =
+        if model.exists(_.frame.modes.bracketedPaste) then s"\u001b[200~$pasted\u001b[201~"
+        else pasted
+      calls.text(session, wrapped)
+
+  /** The focus property's listener and the deterministic test seam both land here, so a harness can drive the same path without relying on
+    * a window manager to move the keyboard.
+    */
+  private[corvi] def focusChanged(focused: Boolean): Unit =
+    canvas.setBaseFocus(focused)
+    if end.isEmpty && model.exists(_.frame.modes.focusReporting) then calls.focus(session, focused)
 
   /** A key the Control-byte table did not consume: a named key goes to the host's encoder, and Alt+printable becomes a Meta key in the
     * modes that ask for it. The unmodified editing keys keep their direct bytes, which is the one path for them.
@@ -498,6 +517,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       case JfxMouseButton.PRIMARY   => Some(MouseButton.Left)
       case JfxMouseButton.MIDDLE    => Some(MouseButton.Middle)
       case JfxMouseButton.SECONDARY => Some(MouseButton.Right)
+      case JfxMouseButton.BACK      => Some(MouseButton.Back)
+      case JfxMouseButton.FORWARD   => Some(MouseButton.Forward)
       case _                        => None
 
   private def sendMouse(

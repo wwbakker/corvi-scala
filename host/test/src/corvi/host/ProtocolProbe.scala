@@ -152,7 +152,7 @@ object ProtocolProbe:
       )
       _ = report("and the deltas are deltas, not whole screens", widest < attached.size.rows, s"widest delta $widest")
 
-      _ <- keyWireCheck(client, cache, info.id, reporter)
+      _ <- wireInputChecks(client, cache, info.id, reporter)
 
       converged <- converges(client, cache, info.id)
       settled <- cache.frame(info.id)
@@ -173,7 +173,7 @@ object ProtocolProbe:
   /** Keys over the wire: the host's encoder, not the client, turns them into the session's bytes. The printable case also proves the
     * enum-with-payload survives the schema and that the Meta prefix is the host's.
     */
-  private def keyWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+  private def wireInputChecks(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
       Frame
   ): Unit < (Async & Abort[Any]) =
     val command =
@@ -187,6 +187,24 @@ object ProtocolProbe:
       keyed <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("WIRE_DONE"))
       keyHex = keyed.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
       _ = reporter.report("keys over the wire are encoded by the host", keyHex.contains("1b5b411b61"), keyHex.takeRight(30))
+      _ <- focusWireCheck(client, cache, id, reporter)
+    yield ()
+
+  /** The focus route with 1004 enabled, so the host has a reason to write the two reports into the raw reader. */
+  private def focusWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command =
+      "printf '\\033[?1004h'; stty raw -echo; printf 'FOCUS_%s\\n' READY; dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+        "printf '\\nFOCUS_%s\\n' DONE; printf '\\033[?1004l'; stty sane\n"
+    for
+      _ <- client.text(id, command)
+      _ <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("FOCUS_READY") && frame.modes.focusReporting)
+      _ <- client.focus(id, focused = true)
+      _ <- client.focus(id, focused = false)
+      focused <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("FOCUS_DONE"))
+      focusHex = focused.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
+      _ = reporter.report("focus events over the wire are encoded by the host", focusHex.contains("1b5b491b5b4f"), focusHex.takeRight(30))
     yield ()
 
   /** A height-only resize (where the rows that survive must not be blanked), a shrink, and history. */

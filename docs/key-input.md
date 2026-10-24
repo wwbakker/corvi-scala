@@ -67,8 +67,8 @@ A temporary `HostSession` (not part of the committed probe suite) ran Pi with th
 - the Alt/Ctrl+Left check did not produce the word-move the check guessed at, so it is recorded as "accepted, no crash" rather than a
   Pi word-motion assertion. The exact bytes are asserted by `HostProbe`.
 
-Pi enables mouse reporting (`1000`/`1002`/`1003`/`1006`), focus reporting (`1004`) and bracketed paste (`2004`) at startup. Mouse reports
-already work; focus and bracketed paste are later slices of the same plan.
+Pi enables mouse reporting (`1000`/`1002`/`1003`/`1006`), focus reporting (`1004`) and bracketed paste (`2004`) at startup. Mouse,
+focus and bracketed-paste reports are now implemented; kitty's keyboard query remains outside this slice.
 
 ## Known limitations
 
@@ -79,3 +79,6 @@ already work; focus and bracketed paste are later slices of the same plan.
   digits or Enter. JavaFX does expose `KP_*` and `NUMPAD*` codes, so supporting the keypad would be a separate partial mapping.
 - **AltGr is still a Control+Alt report.** Where a platform reports AltGr as Control+Alt, the non-Compose Alt modes currently swallow its
   composed typed character. Alt-only composition in Compose mode is unaffected.
+- **1004 is a raw pre-scan.** The host's focus detector sees the input before the emulator, so an `ESC[?1004h` inside an OSC/DCS payload
+  can toggle the flag, and RIS does not clear it. The engine never maps 1004 to `MouseMode.Focus`; the enum member remains only as a
+  total-mapping name, while the host tracks `focusReporting` separately.

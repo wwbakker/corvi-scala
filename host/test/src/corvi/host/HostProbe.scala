@@ -41,6 +41,7 @@ object HostProbe:
       _ <- screenChecks(session, reporter)
       _ <- sizeAndScrollbackChecks(session, reporter)
       _ <- modeChecks(session, reporter)
+      _ <- focusModeChecks(session, reporter)
       _ <- damageChecks(session, reporter)
       _ <- isolationAndTeardownChecks(session, reporter)
       keys <- HostSession.open(SessionId("keys"), index = 1, Paths.get(sys.props("user.dir")), HostSession.loginShell)
@@ -249,23 +250,14 @@ object HostProbe:
         engineModes.size == EngineMouseMode.values.length && engineModes.contains(MouseMode.Focus),
         engineModes.mkString(" ")
       )
-      _ = session.write("printf '\\033[?1004h'\n")
-      _ = await(session)(snapshot => snapshot.modes.mouseMode == MouseMode.Click)
-      _ = session.write("echo AFTER_FOCUS\n")
-      survived <- await(session)(snapshot => lines(snapshot).contains("AFTER_FOCUS"))
-      _ = report(
-        "focus reporting does not kill the session",
-        lines(survived).contains("AFTER_FOCUS") && session.error.isEmpty,
-        s"error ${session.error}"
-      )
-
       // Modes off again: the encoder's fallbacks have to be reported too.
       // zsh turns bracketed paste back on at every prompt, so the transition is only observable while a command still runs.
       _ = session.write(
-        "(printf '\\033[?1000l\\033[?1001l\\033[?1002l\\033[?1003l\\033[?1005l\\033[?1006l\\033[?2004l'; sleep 2)\n"
+        "(printf '\\033[?1000l\\033[?1001l\\033[?1002l\\033[?1003l\\033[?1004l\\033[?1005l\\033[?1006l\\033[?2004l'; sleep 2)\n"
       )
       cleared <- await(session)(snapshot =>
-        snapshot.modes.mouseMode == MouseMode.Off && snapshot.modes.mouseFormat == MouseFormat.X10 && !snapshot.modes.bracketedPaste
+        snapshot.modes.mouseMode == MouseMode.Off && snapshot.modes.mouseFormat == MouseFormat.X10 && !snapshot.modes.bracketedPaste &&
+          !snapshot.modes.focusReporting
       )
       _ = report(
         "turning the modes off is reported",
@@ -285,6 +277,23 @@ object HostProbe:
       _ = session.write("printf '\\033[?1049l'\n")
       restored <- await(session)(snapshot => !snapshot.modes.alternateScreen)
       _ = report("and leaving it is reported", !restored.modes.alternateScreen, s"modes ${restored.modes}")
+    yield ()
+
+  /** 1004 is tracked by the host, not by the engine's mouse-mode callback, so check it on a real shell and reset it again. */
+  private def focusModeChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
+    val report = reporter.report
+    for
+      _ = session.write("printf '\\033[?1004h'; sleep 2\n")
+      focused <- await(session)(snapshot => snapshot.modes.focusReporting)
+      _ = session.write("echo AFTER_FOCUS\n")
+      survived <- await(session)(snapshot => lines(snapshot).contains("AFTER_FOCUS"))
+      _ = report(
+        "focus reporting is reported and does not kill the session",
+        focused.modes.focusReporting && lines(survived).contains("AFTER_FOCUS") && session.error.isEmpty,
+        s"modes ${focused.modes}, error ${session.error}"
+      )
+      _ = session.write("printf '\\033[?1004l'; sleep 2\n")
+      _ <- await(session)(snapshot => !snapshot.modes.focusReporting)
     yield ()
 
   /** The bytes a key sends on a real PTY, in normal and application cursor mode. A raw-mode `dd` is the program that receives them, so the

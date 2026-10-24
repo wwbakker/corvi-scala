@@ -6,8 +6,9 @@ import java.nio.charset.StandardCharsets
 /** Encodes the renderer's cell-relative pointer events in the terminal's current tracking mode and encoding.
   *
   * The protocol names are DECSET's: 1000 is click tracking, 1001 highlight, 1002 button motion and 1003 any motion; 1005, 1006 and 1015
-  * select UTF-8, SGR and urxvt coordinates. The button bits are the xterm ones: shift/alt/control in 4/8/16, motion in 32, and the wheel is
-  * button 64 plus its direction. This lives in the host because the host is the side that knows the modes the emulator received.
+  * select UTF-8, SGR and urxvt coordinates. The button bits are the xterm ones: shift/alt/control in 4/8/16, motion in 32, the wheel is
+  * button 64 plus its direction, and the extended back/forward buttons are 128/129. This lives in the host because the host is the side
+  * that knows the modes the emulator received.
   */
 private[host] object MouseEncoder:
 
@@ -60,10 +61,12 @@ private[host] object MouseEncoder:
 
   private def buttonCode(button: MouseButton): Int =
     button match
-      case MouseButton.Left   => 0
-      case MouseButton.Middle => 1
-      case MouseButton.Right  => 2
-      case _                  => 3
+      case MouseButton.Left    => 0
+      case MouseButton.Middle  => 1
+      case MouseButton.Right   => 2
+      case MouseButton.Back    => 128
+      case MouseButton.Forward => 129
+      case _                   => 3
 
   private def default(input: MouseInput, code: Int): Option[Array[Byte]] =
     val values = Array(code + 32, input.column + 33, input.row + 33)

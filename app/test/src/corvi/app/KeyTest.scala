@@ -29,14 +29,17 @@ final class KeyTest:
     private val texts = new java.util.concurrent.ConcurrentLinkedQueue[String]()
     private val mice = new java.util.concurrent.ConcurrentLinkedQueue[MouseInput]()
     private val keys = new java.util.concurrent.ConcurrentLinkedQueue[KeyInput]()
+    private val focuses = new java.util.concurrent.ConcurrentLinkedQueue[Boolean]()
 
     def sent: Vector[String] = texts.iterator.asScala.toVector
     def mouseEvents: Vector[MouseInput] = mice.iterator.asScala.toVector
     def keyEvents: Vector[KeyInput] = keys.iterator.asScala.toVector
+    def focusEvents: Vector[Boolean] = focuses.iterator.asScala.toVector
     def reset(): Unit =
       texts.clear()
       mice.clear()
       keys.clear()
+      focuses.clear()
 
     def attach(session: SessionId, events: SessionEvents): Unit = ()
     def text(session: SessionId, text: String): Unit =
@@ -45,6 +48,8 @@ final class KeyTest:
       val _ = mice.add(input)
     def key(session: SessionId, input: KeyInput): Unit =
       val _ = keys.add(input)
+    def focus(session: SessionId, focused: Boolean): Unit =
+      val _ = focuses.add(focused)
     def resize(session: SessionId, size: TermSize): Unit = ()
     def history(session: SessionId, from: Int, count: Int): Unit = ()
     def close(session: SessionId): Unit = ()
@@ -345,6 +350,65 @@ final class KeyTest:
     assertTrue(onFx(view.get().flatMap(_.selectedText)).exists(text => text.startsWith("h")))
 
   @Test
+  def `bracketed paste wraps the clipboard only when the program enabled it`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+    val _ = onFx {
+      val content = ClipboardContent()
+      content.putString("one\ntwo")
+      Clipboard.getSystemClipboard().setContent(content)
+    }
+    onFx(terminal.attached(snapshot("hello world", bracketedPaste = true)))
+    press(KeyCode.V, control = true, shift = true)
+    onFx(terminal.attached(snapshot("hello world", bracketedPaste = false)))
+    press(KeyCode.V, control = true, shift = true)
+    assertEquals(Vector("\u001b[200~one\ntwo\u001b[201~", "one\ntwo"), calls.sent)
+
+  @Test
+  def `focus changes are reported only while focus reporting is on`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+
+    onFx(terminal.attached(snapshot("hello world", focusReporting = true)))
+    onFx(terminal.focusChanged(true))
+    onFx(terminal.focusChanged(false))
+    assertEquals(Vector(true, false), calls.focusEvents)
+
+    clear()
+    onFx(terminal.attached(snapshot("hello world", MouseMode.Off)))
+    onFx(terminal.focusChanged(true))
+    onFx(terminal.focusChanged(false))
+    assertEquals(Vector.empty, calls.focusEvents, "a program that did not ask for 1004 gets no reports")
+
+  @Test
+  def `horizontal wheel and extra buttons go to a mouse-aware program`(): Unit =
+    clear()
+    onFx(
+      view
+        .get()
+        .getOrElse(fail("no terminal"))
+        .attached(snapshot("hello world", MouseMode.Click, MouseFormat.Sgr, historyRows = 5))
+    )
+    fireScroll(deltaY = 0, deltaX = 3)
+    fireScroll(deltaY = 0, deltaX = -3)
+    fireMouse(MouseEvent.MOUSE_PRESSED, JfxMouseButton.BACK, 5, 5)
+    fireMouse(MouseEvent.MOUSE_RELEASED, JfxMouseButton.BACK, 5, 5)
+    fireMouse(MouseEvent.MOUSE_PRESSED, JfxMouseButton.FORWARD, 5, 5)
+    fireMouse(MouseEvent.MOUSE_RELEASED, JfxMouseButton.FORWARD, 5, 5)
+    assertEquals(
+      Vector(
+        MouseInput(0, 0, Some(MouseButton.WheelRight), MouseAction.Press, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.WheelLeft), MouseAction.Press, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.Back), MouseAction.Press, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.Back), MouseAction.Release, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.Forward), MouseAction.Press, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.Forward), MouseAction.Release, MouseModifiers(false, false, false))
+      ),
+      calls.mouseEvents
+    )
+    assertEquals(0, onFx(view.get().flatMap(_.screen).map(_.scrollOffset).getOrElse(-1)))
+
+  @Test
   def `an ended session takes no keys, paste or mouse reports`(): Unit =
     clear()
     val ended = onFx {
@@ -436,7 +500,10 @@ final class KeyTest:
   private def snapshot(
       text: String,
       mode: MouseMode = MouseMode.Off,
-      format: MouseFormat = MouseFormat.X10
+      format: MouseFormat = MouseFormat.X10,
+      bracketedPaste: Boolean = false,
+      historyRows: Int = 0,
+      focusReporting: Boolean = false
   ): Snapshot =
     val cells = text.map(character => Cell(character.toString, CellWidth.Narrow, None, None, false, false, false, false)).toVector
     Snapshot(
@@ -444,8 +511,15 @@ final class KeyTest:
       size = TermSize(cols = cells.size, rows = 1),
       rows = Vector(Row(cells)),
       cursor = Cursor(0, 0, None, blinking = false, visible = true),
-      modes = Modes(alternateScreen = false, mode, format, bracketedPaste = false, title = ""),
-      historyRows = 0,
+      modes = Modes(
+        alternateScreen = false,
+        mode,
+        format,
+        bracketedPaste = bracketedPaste,
+        title = "",
+        focusReporting = focusReporting
+      ),
+      historyRows = historyRows,
       theme = TerminalTheme(Rgb(255, 255, 255), Rgb(0, 0, 0))
     )
 
@@ -483,10 +557,10 @@ final class KeyTest:
       Event.fireEvent(target, event)
     }
 
-  private def fireScroll(deltaY: Double): Unit =
-    fireScrollOn(view.get().getOrElse(fail("no terminal")), deltaY)
+  private def fireScroll(deltaY: Double, deltaX: Double = 0): Unit =
+    fireScrollOn(view.get().getOrElse(fail("no terminal")), deltaY, deltaX)
 
-  private def fireScrollOn(target: TerminalView, deltaY: Double): Unit =
+  private def fireScrollOn(target: TerminalView, deltaY: Double, deltaX: Double = 0): Unit =
     val _ = onFx {
       val event = new ScrollEvent(
         ScrollEvent.SCROLL,
@@ -500,9 +574,9 @@ final class KeyTest:
         false,
         false,
         false,
-        0,
+        deltaX,
         deltaY,
-        0,
+        deltaX,
         deltaY,
         ScrollEvent.HorizontalTextScrollUnits.NONE,
         0,
