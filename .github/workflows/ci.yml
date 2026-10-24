@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'
@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'
@@ -61,12 +61,15 @@ jobs:
 
   ui:
     # The TestFX suite against a real daemon and a real shell, including the window/tab, key and
-    # resize phases. It needs the macOS window server and the arm64 JavaFX native jars.
-    runs-on: macos-latest
+    # resize phases. JavaFX needs a window server, which the hosted macOS runner does not have:
+    # the Job would fail/hang. It runs when CORVI_MACOS_UI is true and CORVI_MACOS_RUNNER names a
+    # self-hosted macOS runner with a display; otherwise it is skipped and ./verify covers it locally.
+    if: ${{ vars.CORVI_MACOS_UI == 'true' }}
+    runs-on: ${{ vars.CORVI_MACOS_RUNNER || 'macos-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'
@@ -88,13 +91,13 @@ jobs:
 
   probes:
     # The image- and PTY-level probes: renderer pixels, UI state, the host's emulator, protocol and
-    # daemon. These are the most timing-sensitive checks; they run on their own so a failure names
-    # the layer instead of hiding in the JUnit summary.
-    runs-on: macos-latest
+    # daemon. The UI probes need a display too, so they share the UI runner switch.
+    if: ${{ vars.CORVI_MACOS_UI == 'true' }}
+    runs-on: ${{ vars.CORVI_MACOS_RUNNER || 'macos-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: zulu
           java-version: '25'

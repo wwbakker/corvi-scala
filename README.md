@@ -11,6 +11,14 @@ and Linux, but only macOS has been run.
 
 This is one screen, not the app: no changes, dashboards, subagents, settings, persistence or remote workspaces.
 
+## Tests
+
+`./verify` is the local gate: formatting, every JUnit/TestFX suite and the five probes. The CI runs
+`checks` (compile + format) and `test` (pure/host suites) on the hosted runners. The `ui` and `probes`
+jobs need a macOS window server, which the hosted macOS runner does not provide; they are skipped
+unless the repository variables `CORVI_MACOS_UI=true` and `CORVI_MACOS_RUNNER=<self-hosted label>`
+point at a macOS runner with a display. Locally, `./verify` runs everything.
+
 ## Two processes
 
 The rewrite splits the old single-process spike in two, and that split is the design:
