@@ -1,5 +1,7 @@
 # corvi-scalafx
 
+[![CI](https://github.com/wwbakker/corvi-scala/actions/workflows/ci.yml/badge.svg)](https://github.com/wwbakker/corvi-scala/actions/workflows/ci.yml)
+
 A feasibility spike: Corvi's terminal screen — a tab strip of real PTY-backed terminals — rebuilt as a Scala 3 desktop
 application, to answer whether the Electron app could be a JVM app instead.
 
