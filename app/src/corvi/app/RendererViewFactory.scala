@@ -14,10 +14,13 @@ import javafx.scene.Node as JfxNode
   */
 private[app] final class RendererViewFactory(
     client: Client,
-    metrics: TerminalMetrics,
+    initialFontSize: Double,
     cwd: String,
     altMode: AltMode = AltMode.configured
 ) extends TerminalViewFactory[JfxNode]:
+
+  /** The current metrics are runtime state, shared by every view this factory opens. */
+  private var metrics: TerminalMetrics = TerminalMetrics.monospaced(initialFontSize)
 
   /** The grid the host gets when the window has not been laid out yet: the size this spike has always started a session at. A first tab
     * asked for before the stage is shown would otherwise be created at one cell per pixel value and then resized into the window.
@@ -39,6 +42,9 @@ private[app] final class RendererViewFactory(
       def focus(): Unit = inner.requestFocus()
       def onActivity(listener: () => Unit): Unit = inner.onOutput(listener)
       def onEnded(listener: Ended => Unit): Unit = inner.onSessionEnded(listener)
+      def setFontSize(size: Double): Unit = inner.setFontSize(size)
+      def openFind(): Unit = inner.openFind()
+      def clearFind(): Unit = inner.clearFind()
 
       /** Out of the sink first: a push that lands after this must not touch a disposed view, and the sink must not keep its frame alive. */
       def dispose(): Unit =
@@ -58,3 +64,8 @@ private[app] final class RendererViewFactory(
   def gridFor(width: Double, height: Double): TermSize =
     if width <= 0 || height <= 0 then defaultGrid
     else TermSize(cols = metrics.layout.colsFor(width), rows = metrics.layout.rowsFor(height))
+
+  def fontSize: Double = metrics.font.getSize
+
+  def setFontSize(size: Double): Unit =
+    metrics = TerminalMetrics.monospaced(size)

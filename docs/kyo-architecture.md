@@ -166,8 +166,8 @@ a supervisor fiber per host with its own scope, and the ended-session reap polic
 
 ### Renderer limits
 
-- Font metrics are measured once, from `Text("M")`/`Text("Mg")`: no re-measure on a DPI or font change, and a half-pixel cell width is
-  rounded up, which makes the grid slightly wider than needed.
+- Font metrics are measured from `Text("M")`/`Text("Mg")`; a size change re-measures on the FX thread and replaces the canvas. A
+  half-pixel cell width is rounded up, which makes the grid slightly wider than needed.
 - A `Wide` cell is one glyph drawn at the cell's left edge with its `Continuation` skipped: right for a monospace font whose CJK glyphs are
   exactly two cells wide, wrong for one where they are not. No fallback font, per-script shaping or emoji presentation.
 - History is refetched wholesale (`from = 1`, `count = offset + rows`) rather than paged incrementally, copied text loses wrapping and has
@@ -179,6 +179,9 @@ a supervisor fiber per host with its own scope, and the ended-session reap polic
 - IME preedit styling is not implemented: the overlay paints one background/underline for every grapheme, while JavaFX's
   `InputMethodTextRun` highlights are ignored. `getLocationOffset` returns zero and `cancelLatestCommittedText` is a no-op, so candidate
   window placement and platform-side cancellation are approximate.
+- Find is literal and client-side: it searches the loaded history plus the live grid, with no regex or future output. History is fetched
+  wholesale on the first query and reused.
+- Font size is a window runtime preference, not a persisted setting.
 
 ## The renderer
 
@@ -190,9 +193,10 @@ they start a real host.
   `ScreenModel` (the live grid or history above it, the scroll offset, the new-output mark, and the copy semantics: wide characters once,
   continuations skipped, trailing blanks trimmed). No JavaFX type appears in any of them, so hit-testing, scrolling and copying are checked
   without a toolkit.
-- **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, glyph (bold/italic via cached fonts, underline
-  as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model and the selection and calls the painter; blinking
-  is a timeline the view switches on when the frame's cursor blinks, and off for captures.
+- **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, find highlights, glyph (bold/italic via
+  cached fonts, underline as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model, selection, IME
+  preedit and find highlights and calls the painter; blinking is a timeline the view switches on when the frame's cursor blinks, and off
+  for captures.
 - **Focus.** A window without the keyboard draws the cursor hollow — stroke only, no fill and no glyph redraw, so the cell keeps its own
   colour: it says where the cursor would be, not that it has focus. Focus is a base flag the view sets from its own `focusedProperty`, with an
   override a harness can drive, because a canvas never takes the keyboard itself.
@@ -217,6 +221,11 @@ they start a real host.
   **Focus reporting** follows the frame's `focusReporting`: a focus change is sent only while `1004` is on. **IME preedit** is a canvas
   overlay at the cursor; only committed text goes through `session.text`, so the host grid never sees a partial composition. The view
   implements the minimal `InputMethodRequests` needed for candidate placement.
+- **Find.** `TerminalSearch` is a pure literal search over loaded history plus the live grid. The view's find bar fetches all available
+  history on the first query, scrolls to a selected match, and paints all matches with the current one stronger. Leaving the tab or ending
+  the session clears it.
+- **Font size.** The window owns one runtime size preference. A chord re-measures every mounted view, replaces its canvas while keeping
+  the model, selection and scrollback offset, and asks the host for a grid that fits; the factory uses the new size for later tabs.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
@@ -402,7 +411,7 @@ The UI is testable with a fake `TerminalViewFactory`; the host and renderer are 
 
 ## Non-goals for now
 
-Host restart survival, remote hosts, find/hyperlinks (renderer follow-ups), Windows transport.
+Host restart survival, remote hosts, hyperlinks (renderer follow-up), Windows transport.
 
 ## Limits
 

@@ -2,7 +2,7 @@ package corvi.app
 
 import corvi.contract.{Damage, Ended, Frame, SessionId, TermSize}
 import corvi.protocol.{ClientRoutes, FrameSink, HostPaths, SocketWire, TerminalClient, TerminalError}
-import corvi.renderer.{TerminalMetrics, TerminalView}
+import corvi.renderer.TerminalView
 import corvi.ui.ShellView
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicReference
@@ -56,7 +56,7 @@ final class UiTest:
     FxToolkit.setupFixture(new Runnable {
       def run(): Unit =
         resetHostDirectory()
-        val app = AppWindow(primary, TerminalMetrics.monospaced(13), java.lang.System.getProperty("user.dir"))
+        val app = AppWindow(primary, java.lang.System.getProperty("user.dir"))
         window.set(Some(app))
         // Read before the client's answers can swap the scene: `connect` only schedules the shell, so this is the first frame it showed.
         placeholderShown.set(primary.getScene.getRoot.lookup(".status-view") != null)

@@ -119,6 +119,25 @@ final class ChordsTest:
     assertEquals(Chords.Outcome.Passed, Chords.press(Chords.initial, shiftC, mac = true, now)._2)
     assertFalse(Chords.typed(Chords.press(Chords.initial, shiftC, mac = true, now)._1, now + 1)._2, "an uppercase C is a character")
 
+  @Test def `find and font chords are application actions`(): Unit =
+    assertEquals(Chords.Key.Find, Chords.Key.from(key(javafx.scene.input.KeyCode.F, meta = true), true))
+    assertEquals(Chords.Key.Find, Chords.Key.from(key(javafx.scene.input.KeyCode.F, control = true, shift = true), false))
+    assertEquals(Chords.Key.IncreaseFont, Chords.Key.from(key(javafx.scene.input.KeyCode.EQUALS, meta = true), true))
+    assertEquals(Chords.Key.IncreaseFont, Chords.Key.from(key(javafx.scene.input.KeyCode.PLUS, control = true, shift = true), false))
+    assertEquals(Chords.Key.DecreaseFont, Chords.Key.from(key(javafx.scene.input.KeyCode.MINUS, meta = true), true))
+    assertEquals(Chords.Key.DecreaseFont, Chords.Key.from(key(javafx.scene.input.KeyCode.MINUS, control = true, shift = true), false))
+    assertEquals(Chords.Key.ResetFont, Chords.Key.from(key(javafx.scene.input.KeyCode.DIGIT0, meta = true), true))
+    assertEquals(Chords.Key.ResetFont, Chords.Key.from(key(javafx.scene.input.KeyCode.DIGIT0, control = true, shift = true), false))
+
+    assertEquals(Chords.Outcome.Find, Chords.press(Chords.initial, Chords.Key.Find, mac = true, now)._2)
+    assertEquals(Chords.Outcome.IncreaseFont, Chords.press(Chords.initial, Chords.Key.IncreaseFont, mac = true, now)._2)
+    assertEquals(Chords.Outcome.DecreaseFont, Chords.press(Chords.initial, Chords.Key.DecreaseFont, mac = false, now)._2)
+    assertEquals(Chords.Outcome.ResetFont, Chords.press(Chords.initial, Chords.Key.ResetFont, mac = true, now)._2)
+
+  @Test def `a plain letter is not a find or font chord`(): Unit =
+    assertEquals(Chords.Key.Other, Chords.Key.from(key(javafx.scene.input.KeyCode.F), true))
+    assertEquals(Chords.Key.Other, Chords.Key.from(key(javafx.scene.input.KeyCode.EQUALS), true))
+
   @Test def `a plain digit names a position, and nine is not one`(): Unit =
     assertEquals(Chords.Key.Digit(0), Chords.Key.from(key(javafx.scene.input.KeyCode.DIGIT0), true))
     assertEquals(Chords.Key.Digit(8), Chords.Key.from(key(javafx.scene.input.KeyCode.DIGIT8), true))

@@ -39,8 +39,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     with SessionEvents:
 
   private val style: TerminalStyle = TerminalStyle.default
-  private val canvas: TerminalCanvas = TerminalCanvas(metrics, style)
+  private var currentMetrics: TerminalMetrics = metrics
+  private var canvas: TerminalCanvas = TerminalCanvas(currentMetrics, style)
   private val scrollbar: ScrollBar = new ScrollBar()
+  private[corvi] val findBar: FindBar = FindBar()
   scrollbar.setOrientation(Orientation.VERTICAL)
 
   private var model: Option[ScreenModel] = None
@@ -52,10 +54,15 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private var activityListeners: Vector[() => Unit] = Vector.empty
   private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
+  private var focusOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
 
   /** The IME's composed text. It lives here and on the canvas, never in the host's grid; committing it sends only the committed text. */
   private var preedit: Option[Preedit] = None
+
+  private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
+  private var findIndex: Int = -1
+  private var findHistoryRequestedFor: Option[Int] = None
 
   /** An Alt+printable press was sent as a Meta key, so its typed companion is not a character. It is cleared by that companion, or by the
     * next press when the platform sends none.
@@ -109,6 +116,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   locally:
     setFocusTraversable(true)
     setCenter(canvas)
+    setTop(findBar)
     setRight(scrollbar)
     // The view itself is the terminal's colour, so the pixels between the grid and the window edge are not the toolkit's theme.
     setBackground(Background(BackgroundFill(Color.rgb(13, 17, 23), CornerRadii.EMPTY, Insets.EMPTY)))
@@ -122,6 +130,20 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = focusedProperty().addListener((_, _, focused) => focusChanged(focused))
     val _ = widthProperty().addListener((_, _, _) => scheduleResize())
     val _ = heightProperty().addListener((_, _, _) => scheduleResize())
+    val _ = findBar.field.textProperty().addListener((_, _, _) => runFind())
+    findBar.next.setOnAction(_ => nextFind())
+    findBar.previous.setOnAction(_ => previousFind())
+    findBar.close.setOnAction(_ => closeFind())
+    val _ = findBar.field.setOnKeyPressed { event =>
+      event.getCode match
+        case KeyCode.ESCAPE =>
+          event.consume()
+          closeFind()
+        case KeyCode.ENTER =>
+          event.consume()
+          if event.isShiftDown then previousFind() else nextFind()
+        case _ => ()
+    }
     // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
     // control codes the shell would not recognise (`\b` where macOS's `stty erase` expects `^?`). A Command or Control shortcut's typed
     // companion is ignored: the platform sends a KEY_TYPED for the same keystroke even when the window took it, and \u2318C must not also
@@ -148,9 +170,12 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       val shift = event.isShiftDown
       val alt = event.isAltDown
       metaKeyTaken = false
+      if findBar.isOpen && code == KeyCode.ESCAPE then
+        event.consume()
+        closeFind()
       // Copy and paste are the window's own chords, decided before anything is sent: a terminal keeps Ctrl+C for SIGINT, so copy is
       // Cmd+C (or Ctrl+Shift+C as the alias). Control codes then carry every other Control chord to the shell.
-      if ControlKeys.isCopy(code, meta, control, shift, alt) then
+      else if ControlKeys.isCopy(code, meta, control, shift, alt) then
         event.consume()
         val _ = copySelection()
       else if end.nonEmpty then
@@ -345,7 +370,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     model.filter(_.isLive) match
       case Some(current) =>
         val cursor = current.frame.cursor
-        Option(canvas.localToScreen(metrics.layout.cellX(cursor.x), metrics.layout.cellY(cursor.y + 1)))
+        Option(canvas.localToScreen(currentMetrics.layout.cellX(cursor.x), currentMetrics.layout.cellY(cursor.y + 1)))
           .getOrElse(Point2D.ZERO)
       case None => Point2D.ZERO
 
@@ -410,7 +435,103 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     canvas.setBlinking(enabled)
 
   /** Focus, for a harness without a window manager: focused draws a filled cursor, unfocused a hollow one. */
-  def showFocus(focused: Boolean): Unit = canvas.showFocus(focused)
+  def showFocus(focused: Boolean): Unit =
+    focusOverride = Some(focused)
+    canvas.showFocus(focused)
+
+  /** Replaces the metrics and canvas, keeping the model, selection and viewport, then asks the host for the new grid. Runs on the FX
+    * thread; a caller from another thread is marshalled here.
+    */
+  def setFontSize(size: Double): Unit =
+    if size != currentMetrics.font.getSize then
+      if Platform.isFxApplicationThread then replaceCanvas(TerminalMetrics.monospaced(size))
+      else Platform.runLater(() => setFontSize(size))
+
+  /** The current metrics, for the font-size tests. */
+  private[corvi] def fontMetrics: TerminalMetrics = currentMetrics
+
+  private def replaceCanvas(nextMetrics: TerminalMetrics): Unit =
+    val previous = canvas
+    val replacement = TerminalCanvas(nextMetrics, style)
+    currentMetrics = nextMetrics
+    model.foreach(current => replacement.show(current, selection))
+    blinkOverride.foreach(replacement.setBlinking)
+    replacement.setPreedit(preedit)
+    focusOverride.fold(replacement.setBaseFocus(isFocused))(replacement.showFocus)
+    replacement.setFind(findMatches, Option.when(findIndex >= 0)(findIndex))
+    previous.dispose()
+    canvas = replacement
+    setCenter(replacement)
+    resizeTimer.stop()
+    lastRequested = None
+    mismatchScheduled = None
+    requestGridForSize()
+    requestLayout()
+
+  /** Opens the find bar and searches the loaded history + live grid. A first search asks for all available history. */
+  def openFind(): Unit =
+    if end.isEmpty then
+      findHistoryRequestedFor = None
+      findBar.open()
+      runFind()
+      scheduleResize()
+
+  /** Hides the find bar and drops its matches. This is what leaving a tab and ending a session do. */
+  def clearFind(): Unit =
+    val wasOpen = findBar.isOpen
+    findMatches = Vector.empty
+    findIndex = -1
+    findHistoryRequestedFor = None
+    findBar.hide()
+    findBar.setStatusText("")
+    canvas.setFind(Vector.empty, None)
+    if wasOpen then scheduleResize()
+
+  private def closeFind(): Unit =
+    clearFind()
+    requestFocus()
+
+  private def runFind(preserveIndex: Boolean = false): Unit =
+    if findBar.isOpen then
+      val previous = findIndex
+      model.foreach(ensureFindHistory)
+      findMatches = model.map(current => TerminalSearch.search(current, findBar.query)).getOrElse(Vector.empty)
+      findIndex =
+        if findMatches.isEmpty then -1
+        else if preserveIndex && previous >= 0 then math.min(previous, findMatches.size - 1)
+        else 0
+      // A text change starts at the first match; a history update keeps the reader where they were unless there was no match before.
+      applyFind(scroll = !preserveIndex || previous < 0)
+
+  private def nextFind(): Unit =
+    if findMatches.nonEmpty then
+      findIndex = (findIndex + 1) % findMatches.size
+      applyFind(scroll = true)
+
+  private def previousFind(): Unit =
+    if findMatches.nonEmpty then
+      findIndex = Math.floorMod(findIndex - 1, findMatches.size)
+      applyFind(scroll = true)
+
+  /** The current matches and selected index, for the find tests and probes. */
+  private[corvi] def findState: (Vector[TerminalSearch.Match], Option[Int]) =
+    (findMatches, Option.when(findIndex >= 0)(findIndex))
+
+  private def applyFind(scroll: Boolean): Unit =
+    findBar.setStatusText(
+      if findBar.query.isEmpty then ""
+      else if findMatches.isEmpty then "0/0"
+      else s"${findIndex + 1}/${findMatches.size}"
+    )
+    canvas.setFind(findMatches, Option.when(findIndex >= 0)(findIndex))
+    if scroll && findIndex >= 0 then model.foreach(current => scrollTo(TerminalSearch.scrollOffsetFor(current, findMatches(findIndex).row)))
+
+  /** A search needs the whole loaded history, not only the page the viewport happens to have asked for. */
+  private def ensureFindHistory(current: ScreenModel): Unit =
+    val wanted = current.maxScroll
+    if wanted > current.history.size && !findHistoryRequestedFor.contains(wanted) then
+      findHistoryRequestedFor = Some(wanted)
+      calls.history(session, 1, wanted)
 
   /** Asks the host to close this session, which is what closing a tab does. The host then reports the end through the usual push. */
   def closeSession(): Unit = calls.close(session)
@@ -419,6 +540,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     * a closed tab otherwise.
     */
   def dispose(): Unit =
+    clearFind()
     resizeTimer.stop()
     setPreedit(None)
     canvas.dispose()
@@ -490,6 +612,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       historyRequest = None
       updateScrollbar(next)
       redraw()
+      if findBar.isOpen then runFind(preserveIndex = true)
     }
 
   /** The frame the host applied, after the model has it.
@@ -520,6 +643,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private def acceptEnd(ended: Ended): Unit =
     end = Some(ended)
     setPreedit(None)
+    clearFind()
     // A session that has ended takes no resizes — the host refuses them — so the view stops asking instead of logging a refusal per tick.
     resizeTimer.stop()
     endedListeners.foreach(listener => listener(ended))
@@ -661,10 +785,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val (cols, rows) = gridForSize()
     TermSize(cols = cols, rows = rows)
 
-  /** The grid the view has room for, in cells. */
+  /** The grid the view has room for, in cells. The find bar is a top pane, so its managed height is not room for rows. */
   private def gridForSize(): (Int, Int) =
-    val layout = metrics.layout
-    (layout.colsFor(math.max(0, getWidth) - scrollbarExtent), layout.rowsFor(math.max(0, getHeight)))
+    val layout = currentMetrics.layout
+    (layout.colsFor(math.max(0, getWidth) - scrollbarExtent), layout.rowsFor(math.max(0, getHeight - findBarExtent)))
 
   /** The room the scrollbar takes from the content area: the layout's own answer, taken from the scrollbar's managed width, never a
     * constant. The scrollbar is managed exactly while it is visible, so a hidden one takes nothing and the grid stops changing the moment
@@ -673,19 +797,25 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private def scrollbarExtent: Double =
     if scrollbar.isManaged then math.max(scrollbar.getWidth, scrollbar.prefWidth(-1)) else 0.0
 
+  /** The room the find bar takes from the content area, measured the same way as the scrollbar. A hidden bar is unmanaged and takes
+    * nothing; when it is open, its preferred height is known even before the first layout pass.
+    */
+  private def findBarExtent: Double =
+    if findBar.isManaged then math.max(0.0, math.max(findBar.getHeight, findBar.prefHeight(-1))) else 0.0
+
   private def scheduleResize(): Unit =
     if end.isEmpty && model.isDefined then
       resizeTimer.setDuration(Duration.millis(if model.exists(_.frame.modes.alternateScreen) then 100 else 500))
       resizeTimer.playFromStart()
 
   /** A view that has not been laid out yet has no size, and asking the host to fit a grid to nothing would shrink its shell to a corner.
-    * Only a view with room for the canvas and the scrollbar asks for a grid.
+    * Only a view with room for the canvas, the scrollbar and the find bar asks for a grid.
     */
   private def requestGridForSize(): Unit =
     if end.isEmpty then
       model.foreach { current =>
         val extent = scrollbarExtent
-        if getWidth > extent && getHeight > 0 then
+        if getWidth > extent && getHeight > findBarExtent then
           val (cols, rows) = gridForSize()
           val wanted = TermSize(cols = cols, rows = rows)
           // Once per size: the frame lags the request by a round trip, so without this every tick between the two would resend the same grid.

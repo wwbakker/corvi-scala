@@ -16,6 +16,8 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
   private var shown: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
   private var preedit: Option[Preedit] = None
+  private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
+  private var findIndex: Option[Int] = None
   private var cursorOn: Boolean = true
   private var blinkOverride: Option[Boolean] = None
   private var baseFocus: Boolean = false
@@ -44,6 +46,12 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
   /** The IME's composed text, drawn over the grid and never written into the model. */
   def setPreedit(value: Option[Preedit]): Unit =
     preedit = value
+    repaint()
+
+  /** Find matches in document coordinates, with the selected one drawn more strongly. */
+  def setFind(matches: Vector[TerminalSearch.Match], current: Option[Int]): Unit =
+    findMatches = matches
+    findIndex = current
     repaint()
 
   /** Blinking, or its absence, as an override: the frame can ask for blinking on every damage and this still wins. */
@@ -82,7 +90,18 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     setHeight(metrics.layout.height(rows))
 
   def repaint(): Unit =
-    shown.foreach(model => painter.paint(getGraphicsContext2D, model, selection, preedit, cursorOn, focusOverride.getOrElse(baseFocus)))
+    shown.foreach(model =>
+      painter.paint(
+        getGraphicsContext2D,
+        model,
+        selection,
+        preedit,
+        findMatches,
+        findIndex,
+        cursorOn,
+        focusOverride.getOrElse(baseFocus)
+      )
+    )
 
   private def applyBlink(enabled: Boolean): Unit =
     if enabled then blink.play()

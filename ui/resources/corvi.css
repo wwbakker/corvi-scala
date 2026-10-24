@@ -207,6 +207,41 @@
     -fx-background-color: -fx-corvi-well;
 }
 
+/* The find bar is terminal chrome: a query field, a match count, and three small actions. */
+.find-bar {
+    -fx-background-color: -fx-corvi-surface;
+    -fx-border-color: -fx-corvi-line;
+    -fx-border-width: 0 0 1 0;
+    -fx-padding: 6 10 6 10;
+}
+
+.find-bar .text-field {
+    -fx-background-color: -fx-corvi-well;
+    -fx-text-fill: -fx-corvi-text;
+    -fx-prompt-text-fill: -fx-corvi-faint;
+    -fx-border-color: -fx-corvi-line;
+    -fx-border-radius: 4;
+    -fx-background-radius: 4;
+    -fx-padding: 3 7 3 7;
+}
+
+.find-bar .find-status {
+    -fx-text-fill: -fx-corvi-muted;
+    -fx-font-size: 12px;
+    -fx-min-width: 44;
+}
+
+.find-bar .button {
+    -fx-background-color: -fx-corvi-raise;
+    -fx-text-fill: -fx-corvi-text;
+    -fx-background-radius: 4;
+    -fx-padding: 2 7 2 7;
+}
+
+.find-bar .button:hover {
+    -fx-background-color: -fx-corvi-accent;
+}
+
 /* The Overview tab's content. The title rule has to come after the generic `.label` one: JavaFX
    has no `:not()`, and it ranks the two equally. */
 .overview-placeholder {

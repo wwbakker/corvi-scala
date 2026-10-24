@@ -75,15 +75,15 @@ failure.
 ./verify                                                # format check, every suite, then the five probe mains
 ./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
-./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
-./mill -i renderer.test                                 # 42 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit
+./mill -i ui.test                                       # 49 JUnit tests: ShellState transitions, chords, font preference
+./mill -i renderer.test                                 # 49 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit, search
 ./mill -i host.test                                     # JUnit tests: registry, binds, key/mouse/focus/paste input
 ./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
 ./mill -i host.test.runMain corvi.host.HostProbe        # 52 checks: PTY, VT emulation, keys, snapshot/damage, history, resize
 ./mill -i host.test.runMain corvi.host.ProtocolProbe    # 32 checks: routes, typed errors, auth, pushes, reconnects
 ./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
-./mill -i app.test.runMain corvi.app.RendererProbe      # 36 checks: the renderer, paste, IME preedit, selection, scrollback, captures
-./mill -i app.test.runMain corvi.app.UiProbe            # 30 checks: the window, tabs, chords, bells, menus, drag
+./mill -i app.test.runMain corvi.app.RendererProbe      # 39 checks: the renderer, paste, IME, font size, find, selection, scrollback, captures
+./mill -i app.test.runMain corvi.app.UiProbe            # 33 checks: the window, tabs, chords, font size, find, bells, menus, drag
 ./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
 
@@ -134,6 +134,10 @@ for this code base is the first-party skill in [`.agents/skills/kyo-scala/`](.ag
 | right-click a tab → `Close tab` | close it, on any platform |
 | `⌘C` / `ctrl-shift-C` | copy the selection |
 | `⌘V` / `ctrl-shift-V` | paste |
+| `⌘F` / `ctrl-shift-F` | find in the selected terminal |
+| `⌘=` / `ctrl-shift-=` | increase terminal font size |
+| `⌘-` / `ctrl-shift--` | decrease terminal font size |
+| `⌘0` / `ctrl-shift-0` | reset terminal font size |
 
 ### Keys
 
@@ -165,7 +169,7 @@ no keypad digits or Enter.
 `ESC[200~ <clipboard> ESC[201~`; otherwise the clipboard is sent unchanged, so a shell without bracketed paste keeps the old behaviour.
 The text is not inspected or rewritten, and in that mode a multi-line paste is one paste rather than one command per line. The wrapping
 decision comes from the last frame, so a paste racing a `2004` disable can send the bracket markers as literal text. Not implemented,
-deliberately: find, hyperlinks, font-size and `⌘-click`.
+deliberately: hyperlinks and `⌘-click`.
 
 **Mouse reports are forwarded** when the program asks for them (`1000`, `1001`, `1002`, `1003`): clicks, drags, the vertical and horizontal
 wheel, and the back/forward buttons are encoded by the host in the session's format (`1005`, `1006`, `1015` or X10), so a TUI such as Pi
@@ -178,6 +182,16 @@ is drawn over the cursor cell with a background and underline and never written 
 the committed text. The view supplies the minimal JavaFX `InputMethodRequests` needed for candidate-window placement. See
 [docs/ime.md](docs/ime.md) for behaviour and manual checks.
 
+**Find is per terminal and searches history plus the live grid.** `⌘F` / `ctrl-shift-F` opens the selected tab's find bar. The first
+query asks the host for all available scrollback, then searches literally and case-insensitively; matches in history scroll into view,
+the current match is highlighted more strongly, and Enter / the arrows cycle through them. Escape closes the bar; switching tabs or
+ending the session drops its query and highlights. There is no regex and no search of output the host has not sent yet. See
+[docs/find-and-font.md](docs/find-and-font.md).
+
+**Font size is a window preference.** The chords above re-measure every mounted terminal on the FX thread, replace its canvas, keep the
+model, selection and scrollback position, and ask the host for a grid that fits the new metrics. New tabs inherit the current size. It is
+runtime state only until a settings layer exists. See [docs/find-and-font.md](docs/find-and-font.md).
+
 ## Where the state lives
 
 | | |
@@ -187,6 +201,7 @@ the committed text. The view supplies the minimal JavaFX `InputMethodRequests` n
 | each session's rendered frame | the **UI**, one cached frame per session, updated by damage for *all* sessions |
 | theme | `SessionInfo` (the renderer needs it for a cell with no colour of its own) |
 | title, mouse mode/format, alternate screen, bracketed paste, focus reporting | the frame's `Modes`, because they change with the terminal's state |
+| find query and highlights, font size | the **UI**: find is per view; font size is one window preference for now |
 
 History is capped at 5,000 rows per session (Corvi's own default). Damage is absolute and idempotent: applying it twice
 is the same as once, and a stale delta after a resize is dropped rather than thrown. A resize is debounced by the side
@@ -285,7 +300,10 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **No find or hyperlinks** in the renderer.
+- **No hyperlinks** in the renderer.
+- **Find is literal only.** It searches the loaded history plus the live grid, with no regex or future output; the first query asks for
+  all history the host currently has. Matches are refreshed on history arrivals, not on every live-frame change.
+- **Font size is runtime state.** It is not persisted and has no settings UI; all views in the window share it.
 - **IME preedit is an overlay.** Its text-run highlight styles are not drawn, candidate placement is cursor-cell based, and the
   platform's offset/cancel requests are approximate; committed text is real input (see [docs/ime.md](docs/ime.md)).
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.

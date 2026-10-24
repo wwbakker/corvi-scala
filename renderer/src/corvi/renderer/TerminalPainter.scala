@@ -25,6 +25,8 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
       model: ScreenModel,
       selection: Option[Selection],
       preedit: Option[Preedit],
+      findMatches: Vector[TerminalSearch.Match],
+      findCurrent: Option[Int],
       cursorOn: Boolean,
       focused: Boolean
   ): Unit =
@@ -37,6 +39,7 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
 
     val viewport = model.viewport
     val selected = selection.filterNot(_.isEmpty)
+    val findSpans = findSpansFor(model, findMatches, findCurrent)
     val defaultBackground = theme.background
     for row <- 0 until math.min(model.rows, viewport.size) do
       val cells = viewport(row).cells
@@ -52,6 +55,10 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
         if selected.exists(range => range.contains(row, col)) then
           gc.setFill(style.selectionFill)
           gc.fillRect(x, y, layout.cellWidth, layout.cellHeight)
+        findSpans.get((row, col)).foreach { current =>
+          gc.setFill(if current then style.findCurrentFill else style.findFill)
+          gc.fillRect(x, y, layout.cellWidth, layout.cellHeight)
+        }
         if cell.text.nonEmpty && cell.text != " " then drawGlyph(gc, cell, x, y, style.foreground(cell, theme))
 
     // The cursor belongs to the live grid. Scrolled back, the rows under it are history, and a block drawn over them would point at a cell
@@ -109,6 +116,23 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
           case CursorShape.Block       => gc.strokeRect(x + 0.5, y + 0.5, layout.cellWidth - 1, layout.cellHeight - 1)
           case CursorShape.VerticalBar => gc.strokeRect(x + 0.5, y + 0.5, barWidth, layout.cellHeight - 1)
           case CursorShape.Underline   => gc.strokeRect(x + 0.5, y + layout.cellHeight - 2.5, layout.cellWidth - 1, 2)
+
+  /** Maps document matches onto viewport cells; the current match wins when highlights overlap. */
+  private def findSpansFor(
+      model: ScreenModel,
+      matches: Vector[TerminalSearch.Match],
+      current: Option[Int]
+  ): Map[(Int, Int), Boolean] =
+    val spans = scala.collection.mutable.HashMap.empty[(Int, Int), Boolean]
+    matches.zipWithIndex.foreach { case (match_, index) =>
+      TerminalSearch.viewportRow(model, match_.row).foreach { row =>
+        (match_.start to match_.end).foreach { col =>
+          val selected = current.contains(index)
+          spans.update((row, col), selected || spans.getOrElse((row, col), false))
+        }
+      }
+    }
+    spans.toMap
 
   /** Draws the composed text from the cursor cell, using the same placement rules a terminal uses for wide characters. */
   private def paintPreedit(gc: GraphicsContext, model: ScreenModel, theme: TerminalTheme, preedit: Preedit): Unit =

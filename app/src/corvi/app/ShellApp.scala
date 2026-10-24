@@ -1,6 +1,5 @@
 package corvi.app
 
-import corvi.renderer.TerminalMetrics
 import java.util.logging.{LogRecord, Logger}
 import scalafx.application.JFXApp3
 import scalafx.application.JFXApp3.PrimaryStage
@@ -30,4 +29,4 @@ object ShellApp extends JFXApp3:
   override def start(): Unit =
     JFXApp3.AutoShow = false
     stage = new PrimaryStage
-    AppWindow(stage, TerminalMetrics.monospaced(13), java.lang.System.getProperty("user.dir")).connect()
+    AppWindow(stage, java.lang.System.getProperty("user.dir")).connect()

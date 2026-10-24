@@ -2,8 +2,8 @@ package corvi.app
 
 import corvi.contract.SessionInfo
 import corvi.protocol.TerminalError
-import corvi.renderer.{AltMode, TerminalMetrics}
-import corvi.ui.{ShellView, StatusView, Stylesheet}
+import corvi.renderer.AltMode
+import corvi.ui.{ShellView, StatusView, Stylesheet, TerminalFontSize}
 import java.util.concurrent.atomic.AtomicReference
 import javafx.application.Platform
 import javafx.scene.Scene
@@ -18,7 +18,12 @@ import kyo.Frame
   * a stage of its own and gets the same sequence. Nothing here blocks the FX thread waiting for the host; the placeholder is what the
   * window shows meanwhile.
   */
-private[app] final class AppWindow(stage: Stage, metrics: TerminalMetrics, cwd: String, altMode: AltMode = AltMode.configured):
+private[app] final class AppWindow(
+    stage: Stage,
+    cwd: String,
+    altMode: AltMode = AltMode.configured,
+    initialFontSize: Double = TerminalFontSize.default
+):
 
   /** The client this window owns, once the host has answered: closing the window stops its runtime but not the host. */
   private val connected = AtomicReference[Option[Client]](None)
@@ -93,7 +98,7 @@ private[app] final class AppWindow(stage: Stage, metrics: TerminalMetrics, cwd: 
 
   private def show(client: Client, sessions: Vector[SessionInfo]): Unit =
     connected.set(Some(client))
-    val factory = RendererViewFactory(client, metrics, cwd, altMode)
+    val factory = RendererViewFactory(client, initialFontSize, cwd, altMode)
     val shell = ShellView(factory)
     mounted.set(Some(shell))
     val scene = new Scene(shell, 1180, 740)

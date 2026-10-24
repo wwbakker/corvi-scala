@@ -90,6 +90,8 @@ object RendererProbe:
       selectionChecks(view, reporter)
       wideChecks(view, scene, layout, reporter)
       resizeChecks(view, stage.get, layout, reporter)
+      fontSizeChecks(view, reporter)
+      findHighlightChecks(reporter)
       scrollbackChecks(view, reporter, layout)(using stage)
       focusChecks(view, scene, layout, reporter)
       captureChecks(view, scene, reporter)
@@ -286,6 +288,58 @@ object RendererProbe:
           changed > 0 && frameUnchanged,
           s"$changed pixels in the composition, frame unchanged $frameUnchanged"
         )
+
+  /** A real host round-trip: new metrics request a new grid, and reset restores the default. */
+  private def fontSizeChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    val before = onFx((view.fontMetrics.font.getSize, view.frame.map(_.size)))
+    onFx(view.setFontSize(16.0))
+    val grew = poll(waitTimeout) {
+      onFx(view.fontMetrics.font.getSize) == 16.0 && onFx(view.frame.map(_.size)) != before._2
+    }
+    report(
+      "a font change asks the host for a new grid",
+      grew,
+      s"size ${before._1} -> ${onFx(view.fontMetrics.font.getSize)}, grid ${before._2} -> ${onFx(view.frame.map(_.size))}"
+    )
+    onFx(view.setFontSize(13.0))
+    val reset = poll(waitTimeout) {
+      onFx(view.fontMetrics.font.getSize == 13.0 && view.frame.map(_.size).contains(view.contentGrid))
+    }
+    report(
+      "and resetting the font restores the default grid",
+      reset,
+      s"size ${onFx(view.fontMetrics.font.getSize)}, grid ${onFx(view.frame.map(_.size))}"
+    )
+
+  /** A match is painted over its cells; this is the painter half of the search, checked without the real shell. */
+  private def findHighlightChecks(reporter: Reporter): Unit =
+    val report = reporter.report
+    val (plain, highlighted) = onFx {
+      val cells = "alpha beta".map(character => Cell(character.toString, CellWidth.Narrow, None, None, false, false, false, false))
+      val frame = Frame(
+        id = SessionId("find-highlight"),
+        size = TermSize(cells.size, 1),
+        rows = Vector(Row(cells.toVector)),
+        cursor = Cursor(0, 0, None, blinking = false, visible = true),
+        modes = Modes(alternateScreen = false, MouseMode.Off, MouseFormat.X10, bracketedPaste = false, title = ""),
+        historyRows = 0,
+        theme = TerminalTheme(Rgb(230, 237, 243), Rgb(13, 17, 23))
+      )
+      val model = ScreenModel(frame, Vector.empty, scrollOffset = 0, newOutput = false)
+      val matches = TerminalSearch.search(model, "alpha")
+      val canvas = TerminalCanvas(TerminalMetrics.monospaced(fontSize), TerminalStyle.default)
+      canvas.show(model, None)
+      canvas.setBlinking(false)
+      val before = imageOf(canvas)
+      canvas.setFind(matches, Some(0))
+      (before, imageOf(canvas))
+    }
+    report(
+      "a find match is painted over its cells",
+      differingPixels(plain, highlighted) > 0,
+      s"${differingPixels(plain, highlighted)} pixels in the highlighted match"
+    )
 
   /** Selection over the visible cells, and the text a copy would put on the clipboard. */
   private def selectionChecks(view: TerminalPane, reporter: Reporter): Unit =
