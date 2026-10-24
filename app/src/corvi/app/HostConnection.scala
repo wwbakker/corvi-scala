@@ -115,7 +115,10 @@ object HostConnection:
       handler <- JsonRpcHandler.init(transport, ClientRoutes.routes(sink)*)
       service <- Sync.defer(TerminalClient(handler))
       _ <- service.hello(token)
-    yield Client(service, sink)
+      client = Client(service, sink)
+      // The socket's reader or a failed write releases `closed`; surface that once, even when no command is in flight.
+      _ <- Fiber.init(closed.await.andThen(Sync.defer(client.signalConnectionLost())))
+    yield client
 
   private def connectOrStart(paths: HostPaths): Unit =
     if answers(paths.socket) then ()

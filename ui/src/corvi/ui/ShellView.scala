@@ -55,6 +55,9 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
 
   def current: ShellState = state.value
 
+  /** The window's current terminal font preference, for carrying it across a reconnect. */
+  private[corvi] def currentFontSize: Double = fontSize
+
   /** A session the host already had: a reattach after a UI restart, or the first window of a fresh UI. */
   def open(info: SessionInfo): Unit =
     val label = s"${info.id.value}"

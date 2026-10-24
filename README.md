@@ -227,6 +227,11 @@ takes per operation.
 - **Starting.** The UI connects, and if nothing answers spawns the daemon with this JVM's own `java`, classpath and Kyo
   flags, detached (no handle kept, stdin `/dev/null`, output written to `host.log`, truncated on every spawn). Then it
   waits for the socket and says hello.
+- **Reconnecting.** If the socket closes, the window disposes its old views and client, shows `Host lost; reconnecting. The previous
+  shells ended with the host.`, and retries `HostConnection.ensure` with 250 ms → 4 s exponential backoff. A replacement host is
+  listed and its sessions are attached; an empty replacement leaves the window on Overview with the New action, never a silently created
+  blank terminal. Old shells are not preserved: host death is shell death. A build-mismatch restart stays a separate path that replaces the
+  daemon and preserves its socket/token. See [docs/reconnect.md](docs/reconnect.md) for the manual checks.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. Damage is
   pushed per client from that client's own baseline, so two clients can watch the same host without disturbing each other. If the
   daemon reports a different build (`host.identity`) from the UI's own host classes, the UI stops the old daemon and starts a new one;
@@ -297,10 +302,9 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
 
 ## Known limitations
 
-- **No reconnect when the host dies.** The UI attaches once; if the daemon goes away the window keeps the last frames it
-  received. The architecture makes the host's death the shells' death, so this is recorded rather than hidden: restart
-  the window to reconnect to whatever host answers then. A UI restart against a *live* host works — that is the case in
-  scope.
+- **Reconnecting is automatic, not a manual retry UI.** Host loss disposes the old views and retries with bounded backoff (250 ms to
+  4 s); there is no Retry-now button yet. Old shells are gone with the host, so a replacement host starts with whatever sessions it has
+  (possibly none, which lands on Overview). Restart the window only for a manual reset.
 - **No idle exit for the daemon**, and no `setsid`: a launcher that kills its whole process group takes the daemon with it.
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part

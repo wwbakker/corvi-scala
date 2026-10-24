@@ -157,8 +157,9 @@ a supervisor fiber per host with its own scope, and the ended-session reap polic
   `UnsupportedAddressTypeException`, which reads exactly like "nobody is listening". The symptom is a second daemon per
   UI start and a UI that then waits for a socket that already exists; `HostDaemonProbe` checks both the live and the dead
   answer.
-- A UI whose host dies is not reconnected automatically: `HostConnection.ensure` starts a new daemon when it runs, and `ShellApp` does
-  not re-run it on `Closed` (the daemon probe covers a replacement answering, the window does not).
+- A UI whose host dies is reconnected automatically: the client reports a lost socket, `AppWindow` disposes the old shell and client,
+  retries `HostConnection.ensure` with bounded backoff, and reattaches the sessions the replacement lists. An empty replacement stays on
+  the shell's Overview.
 - `host.log` is truncated on every spawn, so it holds one launch's output, not a history.
 - Spawn detachment is `java -cp` with redirected stdio and no handle kept; it does **not** call `setsid`, so a launcher that kills its whole
   process group takes the daemon with it. A packaged app needs its own launcher.
@@ -268,9 +269,10 @@ through a fake factory and know nothing about where pixels or bytes come from.
   and tooltip), `Ending.Failed(reason)` (the reader died; the tooltip carries the reason) or `Ending.Closed` (a client close — you closed the
   tab — with no extra marker). `closed` wins over everything else: a close's code is the signal the host sent, not the shell's own status.
   Otherwise a reader failure is `Failed` and a code is `Exited`. An ended window stops asking for attention, so it never bells.
-- **Not built: reconnect.** `ShellApp` ensures the host, lists once and attaches; if the daemon goes away the window keeps the last frames it
-  received. The architecture already makes a host's death the shells' death, so this phase records the gap instead of hiding it: restarting
-  the window reattaches to whatever host answers then. A UI restart against a *live* host works — that is the case that was in scope.
+- **Reconnecting.** `Client` raises a one-shot connection-lost signal from the socket monitor or a `Closed` command; `AppWindow` owns the
+  supervisor. Each attempt has its own scope, so its handler, reader and serve fiber are released before the next attempt. It shows the
+  lost-host status, disposes the old views, retries with bounded backoff, and reattaches the replacement's sessions. A replacement with no
+  sessions lands on Overview, not a blank terminal. The build-mismatch restart in `HostConnection` is unchanged and separate.
 - `./mill app.run` starts `ShellApp`, the daemon-backed window; the probes and the snapshot harness live in the same module because
   they start a real host.
 
@@ -421,4 +423,5 @@ Host restart survival, remote hosts, URL auto-detection and editor/file-line lin
 5,000 rows of scrollback per session (UI cache and host history); base64 damage initially;
 selection/copy local in the renderer; scrollback paged from the host; a resize is applied on the
 caller's thread under the buffer lock (the PTY is resized at once, so a full-screen program
-redraws through SIGWINCH). The UI does not reconnect to a host that dies (see "The shell").
+redraws through SIGWINCH). The UI reconnects to a replacement host with bounded backoff; old shells do not survive the host's death
+(see "The shell").

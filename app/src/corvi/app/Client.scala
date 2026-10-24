@@ -3,7 +3,7 @@ package corvi.app
 import corvi.contract.*
 import corvi.protocol.{RemoteError, SessionEnded, TerminalError, TerminalService, UnknownSession}
 import corvi.renderer.{SessionCalls, SessionEvents}
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.{CopyOnWriteArrayList, LinkedBlockingQueue}
 import java.util.concurrent.atomic.AtomicBoolean
 import javafx.application.Platform
 import kyo.*
@@ -40,6 +40,10 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
   /** The same for `session.focus`, so an older daemon does not report once per focus change. */
   private val focusUnavailable: AtomicBoolean = new AtomicBoolean(false)
 
+  /** The window's supervisor learns once that the socket has gone, whether the loss surfaced through a command or the reader. */
+  private val connectionLost: AtomicBoolean = new AtomicBoolean(false)
+  private val lostListeners: CopyOnWriteArrayList[() => Unit] = new CopyOnWriteArrayList()
+
   /** A new session at this grid, delivered on the FX thread: `None` when the host refused, and nothing is shown until it arrives. */
   def create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit): Unit =
     offer(Command.Create(cwd, size, onCreated))
@@ -73,6 +77,18 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
     */
   def stop(): Unit =
     val _ = commands.close()
+
+  /** Registers the one-shot connection-lost callback. Registering after the loss runs it immediately. */
+  private[app] def onConnectionLost(listener: () => Unit): Unit =
+    lostListeners.add(listener)
+    if connectionLost.get() then listener()
+
+  /** Called by the socket's close monitor or by a command that sees `Closed`; the callback runs once. */
+  private[app] def signalConnectionLost(): Unit =
+    if connectionLost.compareAndSet(false, true) then lostListeners.forEach(listener => listener())
+
+  /** For the reconnect lifecycle tests: whether the queue has been closed. */
+  private[app] def isStopped: Boolean = commands.isClosed
 
   private def onFx(action: () => Unit): Unit =
     // The one FX hop: nothing else here knows that JavaFX exists.
@@ -133,6 +149,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
         case Result.Success(info)  => Sync.defer(onFx(() => onCreated(Some(info))))
         case Result.Failure(error) =>
           Sync.defer {
+            if connectionGone(error) then signalConnectionLost()
             report(s"create failed: $error")
             onFx(() => onCreated(None))
           }
@@ -155,6 +172,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
         case Result.Success(_)     => Sync.defer(onClosed.foreach(callback => onFx(callback)))
         case Result.Failure(error) =>
           Sync.defer {
+            if connectionGone(error) then signalConnectionLost()
             report(s"close failed: $error")
             onClosed.foreach(callback => onFx(callback))
           }
@@ -172,8 +190,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
       outcome <- Abort.run[TerminalError | Closed](operation)
       _ <- outcome match
         case Result.Success(snapshot) => Sync.defer(onFx(() => target.attached(snapshot)))
-        case Result.Failure(error)    => Sync.defer(onFx(() => target.failed(s"attach failed: $error")))
-        case Result.Panic(error)      => Sync.defer(onFx(() => target.failed(s"attach panicked: $error")))
+        case Result.Failure(error)    =>
+          Sync.defer { if connectionGone(error) then signalConnectionLost(); onFx(() => target.failed(s"attach failed: $error")) }
+        case Result.Panic(error) => Sync.defer(onFx(() => target.failed(s"attach panicked: $error")))
     yield ()
 
   /** Runs one call and reports a typed failure to the view it belongs to; the loop never aborts on a session error. */
@@ -187,6 +206,11 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
     error match
       case SessionEnded(_) | UnknownSession(_) => true
       case _                                   => false
+
+  private def connectionGone(error: TerminalError | Closed): Boolean =
+    error match
+      case _: Closed => true
+      case _         => false
 
   private val unsupportedMouse: String = "the host does not support mouse reports; restart it to load session.mouse"
   private val unsupportedKey: String = "the host does not support key input; restart it to load session.key"
@@ -211,8 +235,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
               report(unsupported)
               events.foreach(target => onFx(() => target.failed(unsupported)))
           }
-        case Result.Failure(error) if sessionGone(error) => Sync.defer(())
-        case Result.Failure(error)                       =>
+        case Result.Failure(error) if connectionGone(error) => Sync.defer(signalConnectionLost())
+        case Result.Failure(error) if sessionGone(error)    => Sync.defer(())
+        case Result.Failure(error)                          =>
           Sync.defer {
             report(s"$label failed: $error")
             events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
@@ -230,9 +255,10 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
     for
       outcome <- Abort.run[TerminalError | Closed](operation)
       _ <- outcome match
-        case Result.Success(value)                       => Sync.defer(handle(value))
-        case Result.Failure(error) if sessionGone(error) => Sync.defer(())
-        case Result.Failure(error)                       =>
+        case Result.Success(value)                          => Sync.defer(handle(value))
+        case Result.Failure(error) if connectionGone(error) => Sync.defer(signalConnectionLost())
+        case Result.Failure(error) if sessionGone(error)    => Sync.defer(())
+        case Result.Failure(error)                          =>
           Sync.defer {
             report(s"$label failed: $error")
             events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
@@ -281,6 +307,9 @@ private[app] object Client:
       if !alreadyClosed then
         val _ = commands.offer(Maybe.Absent)
       !alreadyClosed
+
+    /** Whether the close marker has been appended. */
+    def isClosed: Boolean = closed.get()
 
     /** Blocks until the next command, or `None` once the queue has been closed. */
     def take(): Option[Command] =

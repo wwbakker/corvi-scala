@@ -4,6 +4,7 @@ import corvi.contract.*
 import corvi.protocol.*
 import corvi.renderer.SessionEvents
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicInteger
 import kyo.*
 import kyo.Frame
 import org.junit.jupiter.api.Assertions.*
@@ -39,7 +40,7 @@ final class ClientCapabilityTest:
     def reportedFailures: Vector[String] = failures.iterator().asScala.toVector
 
   /** Only `attach`, `focus` and the history ordering barrier matter here; the rest are inert implementations of the service seam. */
-  private final class FakeService extends TerminalService:
+  private final class FakeService(failClosed: Boolean = false) extends TerminalService:
     def hello(token: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def status(using Frame): HostStatus < (Async & Abort[TerminalError | Closed]) = Sync.defer(HostStatus(0, 0, 0))
     def identity(using Frame): HostIdentity < (Async & Abort[TerminalError | Closed]) = Sync.defer(HostIdentity(0, "test"))
@@ -54,7 +55,8 @@ final class ClientCapabilityTest:
     def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
-      Abort.fail(SessionEnded(id))
+      if failClosed then Abort.fail(new Closed("test socket", summon[Frame], "the host went away"))
+      else Abort.fail(SessionEnded(id))
     def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
 
@@ -70,8 +72,29 @@ final class ClientCapabilityTest:
     )
 
   @Test
+  def `a Closed command signals connection loss once`(): Unit =
+    val client = Client(new FakeService(failClosed = true), new ViewSink)
+    val lost = new CountDownLatch(1)
+    val calls = new AtomicInteger(0)
+    client.onConnectionLost(() => {
+      val _ = calls.incrementAndGet()
+      lost.countDown()
+    })
+    val serving = Thread.ofPlatform().name("closed-client").daemon(true).start { () =>
+      import AllowUnsafe.embrace.danger
+      val _ = KyoApp.Unsafe.runAndBlock(kyo.Duration.Infinity)(client.serve)
+    }
+    try
+      client.focus(session, focused = true)
+      assertTrue(lost.await(5, TimeUnit.SECONDS), "a Closed command wakes the supervisor")
+      assertEquals(1, calls.get(), "the connection-lost signal is delivered once")
+    finally
+      client.stop()
+      serving.join(5000)
+
+  @Test
   def `a focus event that races an ended session is ignored`(): Unit =
-    val client = Client(new FakeService, new ViewSink)
+    val client = Client(new FakeService(), new ViewSink)
     val events = new RecordingEvents
     val serving = Thread.ofPlatform().name("capability-client").daemon(true).start { () =>
       import AllowUnsafe.embrace.danger
