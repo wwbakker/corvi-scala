@@ -86,6 +86,7 @@ object RendererProbe:
       paintChecks(view, scene, layout, reporter)
       damageChecks(view, scene, layout, reporter)
       pasteChecks(view, reporter)
+      preeditChecks(view, reporter)
       selectionChecks(view, reporter)
       wideChecks(view, scene, layout, reporter)
       resizeChecks(view, stage.get, layout, reporter)
@@ -262,6 +263,29 @@ object RendererProbe:
         saved.foreach(value => content.putString(value))
         val _ = Clipboard.getSystemClipboard().setContent(content)
       }
+
+  /** The composition overlay is drawn over the grid by the canvas and never changes the model. */
+  private def preeditChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    onFx(view.screen) match
+      case None        => report("IME preedit paints over the cursor cell without changing the frame", false, "no model")
+      case Some(model) =>
+        val (plain, composed, frameUnchanged) = onFx {
+          val frameBefore = model.frame
+          val canvas = TerminalCanvas(TerminalMetrics.monospaced(fontSize), TerminalStyle.default)
+          canvas.show(model, None)
+          canvas.setBlinking(false)
+          canvas.showFocus(true)
+          val before = imageOf(canvas)
+          canvas.setPreedit(Some(Preedit("日本", 0)))
+          (before, imageOf(canvas), model.frame == frameBefore)
+        }
+        val changed = differingPixels(plain, composed)
+        report(
+          "IME preedit paints over the cursor cell without changing the frame",
+          changed > 0 && frameUnchanged,
+          s"$changed pixels in the composition, frame unchanged $frameUnchanged"
+        )
 
   /** Selection over the visible cells, and the text a copy would put on the clipboard. */
   private def selectionChecks(view: TerminalPane, reporter: Reporter): Unit =

@@ -1,13 +1,25 @@
 package corvi.app
 
 import corvi.contract.*
-import corvi.renderer.{AltMode, CellPosition, SessionCalls, SessionEvents, TerminalMetrics, TerminalView}
+import corvi.renderer.{AltMode, CellPosition, Preedit, SessionCalls, SessionEvents, TerminalMetrics, TerminalView}
 import java.util.concurrent.atomic.{AtomicReference}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.application.Platform
 import javafx.event.Event
+import javafx.geometry.Point2D
 import javafx.scene.Scene
-import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, MouseButton as JfxMouseButton, MouseEvent, ScrollEvent}
+import javafx.scene.input.{
+  Clipboard,
+  ClipboardContent,
+  InputMethodEvent,
+  InputMethodHighlight,
+  InputMethodTextRun,
+  KeyCode,
+  KeyEvent,
+  MouseButton as JfxMouseButton,
+  MouseEvent,
+  ScrollEvent
+}
 import javafx.stage.Stage
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test, TestInstance}
@@ -350,6 +362,66 @@ final class KeyTest:
     assertTrue(onFx(view.get().flatMap(_.selectedText)).exists(text => text.startsWith("h")))
 
   @Test
+  def `IME text location is never null on an unattached or scrolled-back view`(): Unit =
+    val unattached = onFx(TerminalView(calls, SessionId("ime-unattached"), TerminalMetrics.monospaced(13)))
+    val absent = onFx(unattached.getInputMethodRequests.getTextLocation(0))
+    assertNotNull(absent, "an unattached view still answers with a point")
+    assertEquals(Point2D.ZERO, absent)
+    onFx(unattached.dispose())
+
+    val scrolled = onFx {
+      val terminal = TerminalView(calls, SessionId("ime-scrolled"), TerminalMetrics.monospaced(13))
+      terminal.attached(snapshot("hello world", historyRows = 2))
+      terminal.scrollTo(1)
+      terminal
+    }
+    val scrolledLocation = onFx(scrolled.getInputMethodRequests.getTextLocation(0))
+    assertNotNull(scrolledLocation, "a scrolled-back view still answers with a point")
+    assertEquals(Point2D.ZERO, scrolledLocation)
+    onFx(scrolled.dispose())
+
+  @Test
+  def `IME commits text through session.text`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+    onFx(terminal.attached(snapshot("hello world")))
+    ime(terminal, composed = "", committed = "日本語🙂")
+    assertEquals(Vector("日本語🙂"), calls.sent)
+    assertTrue(onFx(terminal.composition).isEmpty)
+
+  @Test
+  def `IME preedit is painted but not sent until it commits`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+    onFx(terminal.attached(snapshot("hello world")))
+    assertNotNull(onFx(terminal.getInputMethodRequests), "the view exposes IME candidate-window requests")
+    ime(terminal, composed = "にほん", committed = "", caret = 3)
+    assertEquals(Vector.empty, calls.sent, "composed text never reaches the host")
+    assertEquals(Some(Preedit("にほん", 3)), onFx(terminal.composition))
+    ime(terminal, composed = "", committed = "日本")
+    assertEquals(Vector("日本"), calls.sent)
+    assertTrue(onFx(terminal.composition).isEmpty, "commit clears the overlay")
+
+  @Test
+  def `focus loss clears the IME preedit`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+    onFx(terminal.attached(snapshot("hello world")))
+    ime(terminal, composed = "にほん", committed = "", caret = 3)
+    assertEquals(Some(Preedit("にほん", 3)), onFx(terminal.composition))
+    onFx(terminal.focusChanged(false))
+    assertTrue(onFx(terminal.composition).isEmpty, "losing the keyboard cancels the composition overlay")
+
+  @Test
+  def `an IME event with both a commit and a composition does both`(): Unit =
+    clear()
+    val terminal = view.get().getOrElse(fail("no terminal"))
+    onFx(terminal.attached(snapshot("hello world")))
+    ime(terminal, composed = "にほん", committed = "日本", caret = 2)
+    assertEquals(Vector("日本"), calls.sent)
+    assertEquals(Some(Preedit("にほん", 2)), onFx(terminal.composition))
+
+  @Test
   def `bracketed paste wraps the clipboard only when the program enabled it`(): Unit =
     clear()
     val terminal = view.get().getOrElse(fail("no terminal"))
@@ -496,6 +568,14 @@ final class KeyTest:
     }
     try body(terminal)
     finally onFx(terminal.dispose())
+
+  private def ime(target: TerminalView, composed: String, committed: String, caret: Int = 0): Unit =
+    val runs: java.util.List[InputMethodTextRun] =
+      if composed.isEmpty then java.util.List.of[InputMethodTextRun]()
+      else java.util.List.of[InputMethodTextRun](new InputMethodTextRun(composed, InputMethodHighlight.UNSELECTED_RAW))
+    val _ = onFx {
+      Event.fireEvent(target, new InputMethodEvent(InputMethodEvent.INPUT_METHOD_TEXT_CHANGED, runs, committed, caret))
+    }
 
   private def snapshot(
       text: String,

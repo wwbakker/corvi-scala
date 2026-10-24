@@ -176,6 +176,9 @@ a supervisor fiber per host with its own scope, and the ended-session reap polic
   probe asserts the copied text rather than the system clipboard.
 - Focus and blink are overridden for captures; neither is asserted against a real window manager, and the blink has no phase relationship
   with the host.
+- IME preedit styling is not implemented: the overlay paints one background/underline for every grapheme, while JavaFX's
+  `InputMethodTextRun` highlights are ignored. `getLocationOffset` returns zero and `cancelLatestCommittedText` is a no-op, so candidate
+  window placement and platform-side cancellation are approximate.
 
 ## The renderer
 
@@ -211,7 +214,9 @@ they start a real host.
   on; the clipboard text itself is untouched. **Mouse reporting** is forwarded when the program enables it: the view maps a click, drag,
   vertical or horizontal wheel, or back/forward button to a cell and a button, and the host encodes it in the session's current
   mode/format. Shift/Option-drag forces a local selection; without mouse reporting, drag selects and the wheel scrolls the local history.
-  **Focus reporting** follows the frame's `focusReporting`: a focus change is sent only while `1004` is on.
+  **Focus reporting** follows the frame's `focusReporting`: a focus change is sent only while `1004` is on. **IME preedit** is a canvas
+  overlay at the cursor; only committed text goes through `session.text`, so the host grid never sees a partial composition. The view
+  implements the minimal `InputMethodRequests` needed for candidate placement.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
@@ -397,7 +402,7 @@ The UI is testable with a fake `TerminalViewFactory`; the host and renderer are 
 
 ## Non-goals for now
 
-Host restart survival, remote hosts, find/hyperlinks/IME (renderer follow-ups), Windows transport.
+Host restart survival, remote hosts, find/hyperlinks (renderer follow-ups), Windows transport.
 
 ## Limits
 

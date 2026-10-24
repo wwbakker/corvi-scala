@@ -15,6 +15,7 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
 
   private var shown: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
+  private var preedit: Option[Preedit] = None
   private var cursorOn: Boolean = true
   private var blinkOverride: Option[Boolean] = None
   private var baseFocus: Boolean = false
@@ -38,6 +39,11 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
 
   def select(selection: Option[Selection]): Unit =
     this.selection = selection
+    repaint()
+
+  /** The IME's composed text, drawn over the grid and never written into the model. */
+  def setPreedit(value: Option[Preedit]): Unit =
+    preedit = value
     repaint()
 
   /** Blinking, or its absence, as an override: the frame can ask for blinking on every damage and this still wins. */
@@ -76,7 +82,7 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     setHeight(metrics.layout.height(rows))
 
   def repaint(): Unit =
-    shown.foreach(model => painter.paint(getGraphicsContext2D, model, selection, cursorOn, focusOverride.getOrElse(baseFocus)))
+    shown.foreach(model => painter.paint(getGraphicsContext2D, model, selection, preedit, cursorOn, focusOverride.getOrElse(baseFocus)))
 
   private def applyBlink(enabled: Boolean): Unit =
     if enabled then blink.play()

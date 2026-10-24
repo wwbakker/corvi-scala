@@ -4,14 +4,23 @@ import corvi.contract.*
 import corvi.protocol.*
 import javafx.animation.PauseTransition
 import javafx.application.Platform
-import javafx.geometry.{Insets, Orientation}
+import javafx.geometry.{Insets, Orientation, Point2D}
 import javafx.scene.control.ScrollBar
-import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, MouseButton as JfxMouseButton, ScrollEvent}
+import javafx.scene.input.{
+  Clipboard,
+  ClipboardContent,
+  InputMethodEvent,
+  InputMethodRequests,
+  KeyCode,
+  MouseButton as JfxMouseButton,
+  ScrollEvent
+}
 import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
 import javafx.scene.paint.Color
 import javafx.util.Duration
 import kyo.*
 import kyo.Frame
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 /** One terminal on screen: the canvas, its scrollbar, and the input that goes back to the host.
@@ -44,6 +53,9 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
+
+  /** The IME's composed text. It lives here and on the canvas, never in the host's grid; committing it sends only the committed text. */
+  private var preedit: Option[Preedit] = None
 
   /** An Alt+printable press was sent as a Meta key, so its typed companion is not a character. It is cleared by that companion, or by the
     * next press when the platform sends none.
@@ -156,6 +168,19 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
           case None => nonControlKey(code, event)
       else nonControlKey(code, event)
     }
+    // IME composition arrives separately from KEY_TYPED. The committed text is ordinary input; the composed text is only painted over
+    // the cursor cell until the platform commits or cancels it.
+    val _ = setOnInputMethodTextChanged { event =>
+      if end.isEmpty then inputMethodChanged(event)
+    }
+    setInputMethodRequests(new InputMethodRequests:
+      override def getTextLocation(offset: Int): Point2D = textLocation()
+      // The renderer does not own an editable text buffer to map a screen point back into; the platform only needs a location for the
+      // candidate window, which `getTextLocation` supplies.
+      override def getLocationOffset(x: Int, y: Int): Int = 0
+      // The host owns the grid: undoing committed text here would be a second input path.
+      override def cancelLatestCommittedText(): Unit = ()
+      override def getSelectedText(): String = null)
     val _ = setOnMousePressed(event =>
       requestFocus()
       terminalButton(event.getButton) match
@@ -294,7 +319,35 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     */
   private[corvi] def focusChanged(focused: Boolean): Unit =
     canvas.setBaseFocus(focused)
+    if !focused then setPreedit(None)
     if end.isEmpty && model.exists(_.frame.modes.focusReporting) then calls.focus(session, focused)
+
+  /** The composed text currently painted over the cursor; for the IME tests and probes. */
+  private[corvi] def composition: Option[Preedit] = preedit
+
+  private def inputMethodChanged(event: InputMethodEvent): Unit =
+    val committed = Option(event.getCommitted).getOrElse("")
+    val composed = Option(event.getComposed).map(_.asScala.map(_.getText).mkString).getOrElse("")
+    if committed.nonEmpty then calls.text(session, committed)
+    if composed.nonEmpty then setPreedit(Some(Preedit(composed, event.getCaretPosition)))
+    else setPreedit(None)
+
+  private def setPreedit(value: Option[Preedit]): Unit =
+    preedit = value
+    canvas.setPreedit(value)
+
+  /** The screen location of the cursor cell's lower edge, which is where the platform should place its candidate window.
+    *
+    * JavaFX 26 dereferences this result, so it must never be null: an unattached view, a scrolled-back frame or a node that is not in a
+    * showing window gets `Point2D.ZERO` instead.
+    */
+  private def textLocation(): Point2D =
+    model.filter(_.isLive) match
+      case Some(current) =>
+        val cursor = current.frame.cursor
+        Option(canvas.localToScreen(metrics.layout.cellX(cursor.x), metrics.layout.cellY(cursor.y + 1)))
+          .getOrElse(Point2D.ZERO)
+      case None => Point2D.ZERO
 
   /** A key the Control-byte table did not consume: a named key goes to the host's encoder, and Alt+printable becomes a Meta key in the
     * modes that ask for it. The unmodified editing keys keep their direct bytes, which is the one path for them.
@@ -367,6 +420,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     */
   def dispose(): Unit =
     resizeTimer.stop()
+    setPreedit(None)
     canvas.dispose()
 
   /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
@@ -465,6 +519,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
 
   private def acceptEnd(ended: Ended): Unit =
     end = Some(ended)
+    setPreedit(None)
     // A session that has ended takes no resizes — the host refuses them — so the view stops asking instead of logging a refusal per tick.
     resizeTimer.stop()
     endedListeners.foreach(listener => listener(ended))

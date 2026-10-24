@@ -20,7 +20,14 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
     measured.setFont(metrics.font)
     math.ceil(measured.getLayoutBounds.getWidth) + layout.cellWidth
 
-  def paint(gc: GraphicsContext, model: ScreenModel, selection: Option[Selection], cursorOn: Boolean, focused: Boolean): Unit =
+  def paint(
+      gc: GraphicsContext,
+      model: ScreenModel,
+      selection: Option[Selection],
+      preedit: Option[Preedit],
+      cursorOn: Boolean,
+      focused: Boolean
+  ): Unit =
     val theme = model.frame.theme
     val width = layout.width(model.cols)
     val height = layout.height(model.rows)
@@ -51,6 +58,9 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
     // the terminal is not on.
     if cursorOn && model.isLive then paintCursor(gc, model, theme, focused)
     if model.newOutput then paintNewOutput(gc, model)
+    // The IME's composition is chrome on top of the grid, the way a terminal draws its preedit over the cursor cell. It is painted after
+    // the cursor so a block cursor cannot hide it, and it never touches the host's cells.
+    if model.isLive then preedit.foreach(value => paintPreedit(gc, model, theme, value))
 
   /** A glyph, in the font its attributes ask for (bold and italic together when both are set), with the underline drawn as a hairline under
     * the cell.
@@ -99,6 +109,29 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
           case CursorShape.Block       => gc.strokeRect(x + 0.5, y + 0.5, layout.cellWidth - 1, layout.cellHeight - 1)
           case CursorShape.VerticalBar => gc.strokeRect(x + 0.5, y + 0.5, barWidth, layout.cellHeight - 1)
           case CursorShape.Underline   => gc.strokeRect(x + 0.5, y + layout.cellHeight - 2.5, layout.cellWidth - 1, 2)
+
+  /** Draws the composed text from the cursor cell, using the same placement rules a terminal uses for wide characters. */
+  private def paintPreedit(gc: GraphicsContext, model: ScreenModel, theme: TerminalTheme, preedit: Preedit): Unit =
+    val cursor = model.frame.cursor
+    val placed = Preedit.place(preedit.text, model.cols, model.rows, cursor.y, cursor.x)
+    placed.foreach { cluster =>
+      val x = layout.cellX(cluster.col)
+      val y = layout.cellY(cluster.row)
+      gc.setFill(style.selectionFill)
+      gc.fillRect(x, y, layout.cellWidth * cluster.width, layout.cellHeight)
+      gc.setFont(metrics.font)
+      gc.setFill(TerminalStyle.toColor(theme.foreground))
+      gc.fillText(cluster.text, x, y + metrics.ascent)
+      gc.setStroke(style.cursor)
+      gc.setLineWidth(1)
+      gc.strokeLine(x, y + layout.cellHeight - 1.5, x + layout.cellWidth * cluster.width, y + layout.cellHeight - 1.5)
+    }
+    Preedit.caretCell(preedit.text, preedit.caret, model.cols, model.rows, cursor.y, cursor.x).foreach { caret =>
+      val x = layout.cellX(caret.col)
+      val y = layout.cellY(caret.row)
+      gc.setFill(style.cursor)
+      gc.fillRect(x, y, math.max(1.0, layout.cellWidth / 10), layout.cellHeight)
+    }
 
   /** The mark that says output arrived while the user was reading history. */
   private def paintNewOutput(gc: GraphicsContext, model: ScreenModel): Unit =

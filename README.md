@@ -76,13 +76,13 @@ failure.
 ./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
 ./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
-./mill -i renderer.test                                 # 37 JUnit tests: ScreenModel, Layout, Selection, key mapping
+./mill -i renderer.test                                 # 42 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit
 ./mill -i host.test                                     # JUnit tests: registry, binds, key/mouse/focus/paste input
 ./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
 ./mill -i host.test.runMain corvi.host.HostProbe        # 52 checks: PTY, VT emulation, keys, snapshot/damage, history, resize
 ./mill -i host.test.runMain corvi.host.ProtocolProbe    # 32 checks: routes, typed errors, auth, pushes, reconnects
 ./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
-./mill -i app.test.runMain corvi.app.RendererProbe      # 35 checks: the renderer, paste, selection, scrollback, captures
+./mill -i app.test.runMain corvi.app.RendererProbe      # 36 checks: the renderer, paste, IME preedit, selection, scrollback, captures
 ./mill -i app.test.runMain corvi.app.UiProbe            # 30 checks: the window, tabs, chords, bells, menus, drag
 ./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
@@ -172,6 +172,11 @@ wheel, and the back/forward buttons are encoded by the host in the session's for
 works as it does in Corvi. Shift-drag, or Option-drag on macOS, keeps the mouse for a local text selection while such a program is
 running. **Focus reporting (`1004`)** is forwarded only while the program has it enabled: focus-in is `ESC[I`, focus-out `ESC[O`, and
 every other mode ignores the window's focus changes.
+
+**IME text is committed on `session.text`.** A committed composition goes to the shell exactly as typed text does. The platform's preedit
+is drawn over the cursor cell with a background and underline and never written into the host grid; committing clears it and sends only
+the committed text. The view supplies the minimal JavaFX `InputMethodRequests` needed for candidate-window placement. See
+[docs/ime.md](docs/ime.md) for behaviour and manual checks.
 
 ## Where the state lives
 
@@ -280,7 +285,9 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **No find, no hyperlinks** in the renderer, and no IME.
+- **No find or hyperlinks** in the renderer.
+- **IME preedit is an overlay.** Its text-run highlight styles are not drawn, candidate placement is cursor-cell based, and the
+  platform's offset/cancel requests are approximate; committed text is real input (see [docs/ime.md](docs/ime.md)).
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.
 - **The UI probes need a display server** (not a visible display); they drive real JavaFX events and real processes.
