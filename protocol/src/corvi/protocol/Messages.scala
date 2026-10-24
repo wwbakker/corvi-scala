@@ -19,6 +19,9 @@ object Messages:
   /** `session.text`: bytes for the shell's input, as if pasted. Key and mouse events come with the renderer, which knows the modes. */
   final case class TextParams(id: SessionId, text: String) derives Schema, CanEqual
 
+  /** `session.mouse`: one pointer event, in cells, for the host to encode in the session's current mouse mode. */
+  final case class MouseParams(id: SessionId, input: MouseInput) derives Schema, CanEqual
+
   /** `session.resize`: the grid the client wants. */
   final case class ResizeParams(id: SessionId, size: TermSize) derives Schema, CanEqual
 

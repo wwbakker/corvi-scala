@@ -56,7 +56,9 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
   /** A session the host already had: a reattach after a UI restart, or the first window of a fresh UI. */
   def open(info: SessionInfo): Unit =
     val label = s"${info.id.value}"
-    val (next, id) = current.opened(label, info.id)
+    val (opened, id) = current.opened(label, info.id)
+    // A session that ended while no UI was attached is still listed so its final screen can come back; its tab must come back ended too.
+    val next = info.ending.fold(opened)(ended => opened.ended(id, ended))
     state.value = next
     val view = factory.open(
       info,

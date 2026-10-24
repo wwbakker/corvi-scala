@@ -47,7 +47,9 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
           gc.fillRect(x, y, layout.cellWidth, layout.cellHeight)
         if cell.text.nonEmpty && cell.text != " " then drawGlyph(gc, cell, x, y, style.foreground(cell, theme))
 
-    if cursorOn then paintCursor(gc, model, theme, focused)
+    // The cursor belongs to the live grid. Scrolled back, the rows under it are history, and a block drawn over them would point at a cell
+    // the terminal is not on.
+    if cursorOn && model.isLive then paintCursor(gc, model, theme, focused)
     if model.newOutput then paintNewOutput(gc, model)
 
   /** A glyph, in the font its attributes ask for (bold and italic together when both are set), with the underline drawn as a hairline under

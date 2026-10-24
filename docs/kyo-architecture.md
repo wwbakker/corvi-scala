@@ -53,8 +53,10 @@ The **host interprets the terminal**; the frontend only renders it.
   the row indexes mean a different grid.
 - `session.history(id, from, count)` — scrollback pages, newest first, `from` counting back
   from the most recent.
-- `session.key(id, keyCode, modifiers, text)` / `session.mouse(...)` / `session.resize(id, cols, rows)`
-  — the host owns key/mouse encoding (`TerminalKeyEncoder`) because it knows the terminal modes.
+- `session.mouse(id, input)` — one pointer event in terminal cells. The host owns the encoding because it knows the mouse mode and format
+  the program enabled (`1000`/`1001`/`1002`/`1003` and `1005`/`1006`/`1015`/X10).
+- `session.key(id, keyCode, modifiers, text)` / `session.resize(id, cols, rows)` — key encoding is still planned; resize is applied by the
+  host.
 - `session.ended(id, ended)` — once per attached client: `closed` says who ended it, `code` is
   advisory, `reason` carries a reader failure. `sessions.list`, `session.create`, `session.close`.
 - Base64 cell payloads first; a compact binary framing can replace them later without changing
@@ -66,10 +68,11 @@ The **host interprets the terminal**; the frontend only renders it.
 
 - **Routes**: names in `Methods`, params in `Messages`, and the client's two notification routes in
   `ClientRoutes` — all in `protocol`. The host's answering routes are `HostRoutes` in `host`,
-  because they need the live sessions. `session.text`/`session.resize` are requests, not
-  notifications: a client wants to know when the host no longer has the session. `text` is
-  paste-only for now; `session.key`/`session.mouse` arrive with the renderer, which owns the event
-  model, and the host will encode them because it knows the modes.
+  because they need the live sessions. `session.text`/`session.mouse`/`session.resize` are requests,
+  not notifications: a client wants to know when the host no longer has the session. `text` is
+  paste-only; mouse input carries cells and buttons and the host encodes it in the mode and format
+  the program enabled. `session.key` is still planned because arrow and modified function keys need
+  the same mode-dependent treatment.
 - **`protocol` depends on `contract` and `kyo-jsonrpc` only**; `host` depends on `protocol`. A UI
   build therefore takes the client half without pty4j, jeditermfx or the host's JVM flags. For the
   same reason the protocol probe lives in `host` (`corvi.host.ProtocolProbe`): it needs real shells.
@@ -128,12 +131,13 @@ as applying it once. Two rules follow, and both are load-bearing:
 `code` (advisory — a host-initiated close reports whatever the PTY made of the signal) and `reason`
 for a reader failure. The session then **stays listed with `running = false`**, so a tab can show
 its final screen and the client can still read history; `session.close` is what removes it, and
-`session.text`/`session.resize` on it fail with the typed `SessionEnded`. Reaping ended sessions on
+`session.text`/`session.resize` on it fail with the typed `SessionEnded`. Its `SessionInfo` also
+carries the `Ended` value, so a client that lists the sessions later — a UI restart, say — can show
+the same exit code or failure reason it would have received in the push. Reaping ended sessions on
 a timer is a host-phase decision, not this one.
 
-Still planned, not built: `Channel`/`Signal` between the reader and the push loops, `session.key`
-and `session.mouse`, a supervisor fiber per host with its own scope, and the ended-session reap
-policy.
+Still planned, not built: `Channel`/`Signal` between the reader and the push loops, `session.key`,
+a supervisor fiber per host with its own scope, and the ended-session reap policy.
 
 ### Daemon limits
 
@@ -163,8 +167,8 @@ policy.
   exactly two cells wide, wrong for one where they are not. No fallback font, per-script shaping or emoji presentation.
 - History is refetched wholesale (`from = 1`, `count = offset + rows`) rather than paged incrementally, copied text loses wrapping and has
   no line join, and a resize while scrolled back does not reflow history.
-- Input is paste-and-edit only (see above); the clipboard write is unchecked because the probe machine is headless, and the probe asserts the
-  copied text rather than the system clipboard.
+- Input is paste, edit and mouse reports (see above); arrows and modified keys still need the host's key encoder. The clipboard write is
+  unchecked because the probe machine is headless, and the probe asserts the copied text rather than the system clipboard.
 - Focus and blink are overridden for captures; neither is asserted against a real window manager, and the blink has no phase relationship
   with the host.
 
@@ -191,9 +195,10 @@ they start a real host.
   resize, history) to a blocking queue that one fiber drains, and every result and every push comes back through `Platform.runLater`. That is
   two hops in the whole renderer, and it is why `SessionEvents` can promise the FX thread and `FrameSink` is the only place that hops.
 - **Input.** Typed characters go out as `session.text`, and the editing keys — Backspace as `^?`, Enter as `\r`, Tab, Escape — are forwarded
-  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. **This build is
-  paste-and-edit only**: arrows, modified keys and mouse report nothing, because they need the host's mode-dependent encoding and a
-  `session.key`/`session.mouse` route; mouse drag selects locally and wheel scrolls.
+  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. **Mouse reporting is
+  forwarded** when the program enables it: the view maps a click, drag or wheel to a cell and a button, and the host encodes it in the
+  session's current mode/format. Shift/Option-drag forces a local selection; without mouse reporting, drag selects and the wheel scrolls the
+  local history. Arrows and modified keys still need `session.key`.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
@@ -276,7 +281,9 @@ connects to it; it does not own it.
   nothing waits for it, nothing destroys it. Then it waits for the socket and says hello. The packaged app will need a launcher of its own;
   `java -cp` is what a Mill-run UI can do.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. A second client can attach to the
-  same host at the same time; damage is pushed per client from that client's own baseline, so neither disturbs the other.
+  same host at the same time; damage is pushed per client from that client's own baseline, so neither disturbs the other. The daemon also
+  answers `host.identity` with a fingerprint of the `host`/`protocol`/`contract` classes; when it differs from the UI's own build, the UI
+  stops the old daemon and starts a new one. That is a deliberate host restart: the old daemon's shells end.
 - Windows (TCP or a named pipe) is out of scope; only the transport seam would change, not the routes or the lifecycle.
 
 ## Modules (Mill)

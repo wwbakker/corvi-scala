@@ -84,7 +84,10 @@ object HostProbe:
       _ = session.write(
         "printf '\\033[31mRED\\033[0m \\033[1;32mGREEN\\033[0m \\033[44;37mBG\\033[0m \\033[7mINV\\033[0m \\033[4mUND\\033[0m\\n'\n"
       )
-      coloured <- await(session)(snapshot => lines(snapshot).exists(_.contains("UND")))
+      // The echoed command contains the same words. Wait for the styled output line, not for a word the echo also has.
+      coloured <- await(session)(snapshot =>
+        cellOf(snapshot, "RED").exists(_.foreground.isDefined) && cellOf(snapshot, "UND").exists(_.underline)
+      )
       red = cellOf(coloured, "RED")
       green = cellOf(coloured, "GREEN")
       _ = report(

@@ -116,6 +116,9 @@ private[corvi] final class HostSessions private (
   def text(id: SessionId, text: String)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.write(text))
 
+  def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
+    live(id).map(managed => managed.session.mouse(input))
+
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.resize(size))
 

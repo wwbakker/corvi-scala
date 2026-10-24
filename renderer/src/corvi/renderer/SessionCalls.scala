@@ -1,6 +1,6 @@
 package corvi.renderer
 
-import corvi.contract.{Ended, Row, SessionId, Snapshot, TermSize}
+import corvi.contract.{Ended, MouseInput, Row, SessionId, Snapshot, TermSize}
 
 /** What the client's runtime tells a view. Every method runs on the **FX thread**: the runtime hands the call over with
   * `Platform.runLater`, so a view never has to guard its state.
@@ -21,6 +21,7 @@ trait SessionEvents:
 trait SessionCalls:
   def attach(session: SessionId, events: SessionEvents): Unit
   def text(session: SessionId, text: String): Unit
+  def mouse(session: SessionId, input: MouseInput): Unit
   def resize(session: SessionId, size: TermSize): Unit
   def history(session: SessionId, from: Int, count: Int): Unit
   def close(session: SessionId): Unit

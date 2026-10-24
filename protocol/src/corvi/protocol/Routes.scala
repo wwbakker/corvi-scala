@@ -15,6 +15,7 @@ object Methods:
   val History: String = "session.history"
   val Close: String = "session.close"
   val Text: String = "session.text"
+  val Mouse: String = "session.mouse"
   val Resize: String = "session.resize"
   val Damage: String = "session.damage"
   val Ended: String = "session.ended"
@@ -23,6 +24,7 @@ object Methods:
   val Hello: String = "host.hello"
   val Stop: String = "host.stop"
   val Status: String = "host.status"
+  val Identity: String = "host.identity"
 
 /** The routes a client peer answers: the host's two pushes. */
 object ClientRoutes:

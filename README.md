@@ -77,12 +77,13 @@ failure.
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
 ./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
 ./mill -i renderer.test                                 # 14 JUnit tests: ScreenModel, Layout, Selection
-./mill -i app.test                                      # the TestFX suite: the daemon-backed window, end to end
+./mill -i host.test                                     # 13 JUnit tests: registry, concurrent binds, mouse encoding
+./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
 ./mill -i host.test.runMain corvi.host.HostProbe        # 49 checks: PTY, VT emulation, snapshot/damage, history, resize
 ./mill -i host.test.runMain corvi.host.ProtocolProbe    # 30 checks: routes, typed errors, auth, pushes, reconnects
-./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 23 checks: the socket daemon, token, stop, leaks, liveness, pushes
-./mill -i app.test.runMain corvi.app.RendererProbe      # 31 checks: the renderer, selection, scrollback, captures
-./mill -i app.test.runMain corvi.app.UiProbe            # 29 checks: the window, tabs, chords, bells, menus, drag
+./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
+./mill -i app.test.runMain corvi.app.RendererProbe      # 34 checks: the renderer, selection, scrollback, captures
+./mill -i app.test.runMain corvi.app.UiProbe            # 30 checks: the window, tabs, chords, bells, menus, drag
 ./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
 
@@ -147,9 +148,12 @@ them, because Alt is not treated as a shortcut here — its `KEY_TYPED` is the t
 passed as a composed character, not as the terminal's Meta prefix.
 
 Paste is **not** wrapped in bracketed-paste escapes: a multi-line paste runs each line, so pasting a script executes it (Corvi's own
-bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. **Arrow keys,
-modified function keys and mouse reports are still not forwarded**: they need the host's mode-dependent encoding and a `session.key`/`session.mouse` route, which is a renderer
-follow-up.
+bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. **Arrow keys and
+modified function keys are still not forwarded**: they need a mode-dependent `session.key` route, which is a renderer follow-up.
+
+**Mouse reports are forwarded** when the program asks for them (`1000`, `1001`, `1002`, `1003`): clicks, drags and the wheel are encoded by
+the host in the session's format (`1005`, `1006`, `1015` or X10), so a TUI such as Pi works as it does in Corvi. Shift-drag, or Option-drag
+on macOS, keeps the mouse for a local text selection while such a program is running.
 
 ## Where the state lives
 
@@ -181,7 +185,9 @@ takes per operation.
   flags, detached (no handle kept, stdin `/dev/null`, output written to `host.log`, truncated on every spawn). Then it
   waits for the socket and says hello.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. Damage is
-  pushed per client from that client's own baseline, so two clients can watch the same host without disturbing each other.
+  pushed per client from that client's own baseline, so two clients can watch the same host without disturbing each other. If the
+  daemon reports a different build (`host.identity`) from the UI's own host classes, the UI stops the old daemon and starts a new one;
+  that is a host restart, so its shells end with it.
 - **Stopping.** `host.stop` ends the accept loop; the sessions are released (their shells destroyed), the socket and the
   owner marker are unlinked, and the process exits. There is no idle exit: the daemon lives until stopped or killed.
 
@@ -256,8 +262,8 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **Arrow keys and mouse reports are not forwarded** (see [Keys](#keys)). Control keys, copy and paste are; the mode-dependent key and
-  mouse encoding lives in the host's future.
+- **Arrow keys and modified function keys are not forwarded** (see [Keys](#keys)). Control keys, copy and paste, and mouse reports are;
+  the mode-dependent key encoding is still the host's future.
 - **No find, no hyperlinks** in the renderer, and no IME.
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.

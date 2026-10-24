@@ -26,6 +26,9 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
     inner.onOutput(onActivity)
     inner.onSessionEnded(onEnded)
     inner.attach()
+    // The host keeps ended sessions so their final screen can be reattached. Tell the view, not only the tab, or it would keep trying to
+    // resize a session that no longer accepts it.
+    info.ending.foreach(inner.sessionEnded)
     new ShellView[JfxNode]:
       def node: JfxNode = inner
       def focus(): Unit = inner.requestFocus()

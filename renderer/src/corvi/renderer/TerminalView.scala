@@ -6,7 +6,7 @@ import javafx.animation.PauseTransition
 import javafx.application.Platform
 import javafx.geometry.{Insets, Orientation}
 import javafx.scene.control.ScrollBar
-import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, MouseButton, ScrollEvent}
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, MouseButton as JfxMouseButton, ScrollEvent}
 import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
 import javafx.scene.paint.Color
 import javafx.util.Duration
@@ -36,6 +36,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
 
   private var model: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
+  private var pressedTerminalButton: Option[MouseButton] = None
   private var failure: Option[String] = None
   private var end: Option[Ended] = None
   private var blinking: Boolean = false
@@ -58,6 +59,11 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     * rearm the debounce and defer the request forever.
     */
   private var mismatchScheduled: Option[TermSize] = None
+
+  /** The history page the host has been asked for and not answered yet. Output arriving while the reader is scrolled back can make the
+    * viewport need rows it does not have on every damage tick; this keeps that from becoming one request per frame.
+    */
+  private var historyRequest: Option[(Int, Int)] = None
 
   /** How much damage a view that has not attached yet may hold. The host can push before the attach answer lands, so the deltas are kept
     * until the seed arrives — but a view whose attach never completes must not grow the window's memory with a session it will never show.
@@ -107,7 +113,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = setOnKeyTyped { event =>
       val typed = event.getCharacter
       val shortcut = event.isMetaDown || event.isControlDown
-      if !shortcut && typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then calls.text(session, typed)
+      if end.isEmpty && !shortcut && typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then
+        calls.text(session, typed)
     }
     val _ = setOnKeyPressed { event =>
       val code = event.getCode
@@ -120,6 +127,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       if ControlKeys.isCopy(code, meta, control, shift, alt) then
         event.consume()
         val _ = copySelection()
+      else if end.nonEmpty then
+        // The screen is still selectable, but a finished shell takes no input. Swallowing the key also keeps a late key from becoming
+        // a `session has ended` error for every keystroke.
+        event.consume()
       else if ControlKeys.isPaste(code, meta, control, shift, alt) then
         event.consume()
         pasteClipboard()
@@ -132,16 +143,66 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       else editingKey(code, event)
     }
     val _ = setOnMousePressed(event =>
-      if event.getButton == MouseButton.PRIMARY then
-        requestFocus()
-        selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
-        redraw()
+      requestFocus()
+      terminalButton(event.getButton) match
+        case Some(button) if reportingMode.nonEmpty && !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
+          pressedTerminalButton = Some(button)
+          sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+          event.consume()
+        case _ if event.getButton == JfxMouseButton.PRIMARY =>
+          pressedTerminalButton = None
+          selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
+          redraw()
+        case _ => ()
     )
     val _ = setOnMouseDragged(event =>
-      selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
-      redraw()
+      if reportingMode.nonEmpty && forcesSelection(event) then
+        selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
+        redraw()
+      else
+        reportingMode match
+          case Some(MouseMode.AnyMotion) if insideCanvas(event.getX, event.getY) =>
+            sendMouse(event.getX, event.getY, pressedTerminalButton, MouseAction.Move, event)
+            event.consume()
+          case Some(MouseMode.ButtonMotion) if insideCanvas(event.getX, event.getY) =>
+            pressedTerminalButton.foreach { button =>
+              sendMouse(event.getX, event.getY, Some(button), MouseAction.Move, event)
+              event.consume()
+            }
+          case Some(_) => ()
+          case None    =>
+            selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
+            redraw()
     )
-    val _ = setOnScroll((event: ScrollEvent) => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel))
+    val _ = setOnMouseMoved(event =>
+      reportingMode match
+        case Some(MouseMode.AnyMotion)
+            if pressedTerminalButton.isEmpty && !forcesSelection(event) &&
+              insideCanvas(event.getX, event.getY) =>
+          sendMouse(event.getX, event.getY, None, MouseAction.Move, event)
+          event.consume()
+        case _ => ()
+    )
+    val _ = setOnMouseReleased(event =>
+      pressedTerminalButton match
+        case Some(button) =>
+          // Report the release even when the pointer left the grid: a release outside the canvas must not leave the program believing
+          // the button is still down.
+          sendMouse(event.getX, event.getY, Some(button), MouseAction.Release, event)
+          pressedTerminalButton = None
+          event.consume()
+        case None =>
+          if reportingMode.isEmpty && event.getButton == JfxMouseButton.PRIMARY then redraw()
+    )
+    val _ = setOnScroll((event: ScrollEvent) =>
+      reportingMode match
+        case Some(_) if !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
+          if event.getDeltaY != 0 then
+            val button = if event.getDeltaY > 0 then MouseButton.WheelUp else MouseButton.WheelDown
+            sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+            event.consume()
+        case _ => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel)
+    )
     resizeTimer.setOnFinished(_ => requestGridForSize())
 
   /** Joins the host's session: ask for the snapshot that seeds this view. Called after the sink has plugged it, so a delta the host sends
@@ -173,7 +234,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** Types without a keyboard, which is how a harness drives a session. Real input arrives through the key handler below and takes the same
     * path.
     */
-  def typeText(text: String): Unit = calls.text(session, text)
+  def typeText(text: String): Unit =
+    if end.isEmpty then calls.text(session, text)
 
   def select(from: CellPosition, to: CellPosition): Unit =
     selection = Some(Selection(from, to))
@@ -199,7 +261,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. */
   def pasteClipboard(): Unit =
     val pasted = Try(Option(Clipboard.getSystemClipboard().getString)).toOption.flatten.getOrElse("")
-    if pasted.nonEmpty then calls.text(session, pasted)
+    if end.isEmpty && pasted.nonEmpty then calls.text(session, pasted)
 
   /** The keys that are sent as themselves rather than as a character: Backspace is `^?` (what macOS's `stty erase` expects), and Enter, Tab
     * and Escape are the bytes a terminal sends for them.
@@ -235,7 +297,9 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** Releases what this view owns: the resize timer waits on the FX thread and the client runtime parks on a queue, and both would outlive
     * a closed tab otherwise.
     */
-  def dispose(): Unit = resizeTimer.stop()
+  def dispose(): Unit =
+    resizeTimer.stop()
+    canvas.dispose()
 
   /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
     * what returns to the live grid; anything above it is history the client asks the host for.
@@ -246,7 +310,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       model = Some(next)
       // A selection is in viewport rows, so it stops meaning anything the moment they move: the terminal this replaces clears it too.
       if next.scrollOffset != current.scrollOffset then selection = None
-      if next.missingHistory > 0 then calls.history(session, from = 1, count = math.min(next.maxScroll, next.scrollOffset + next.rows))
+      requestMissingHistory(next)
       updateScrollbar(next)
       redraw()
     }
@@ -286,12 +350,14 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   override def attached(snapshot: Snapshot): Unit =
     val next = ScreenModel.from(snapshot)
     lastRequested = None
+    historyRequest = None
     model = Some(next)
     applyBackground(next.frame.theme)
     updateScrollbar(next)
     val pending = pendingDamage
     pendingDamage = Vector.empty
     pending.foreach(applyToModel)
+    model.foreach(requestMissingHistory)
     redraw()
     noteFrame()
 
@@ -299,6 +365,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     model.foreach { current =>
       val next = current.withHistory(rows)
       model = Some(next)
+      historyRequest = None
       updateScrollbar(next)
       redraw()
     }
@@ -340,6 +407,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     model match
       case Some(_) =>
         applyToModel(damage)
+        model.foreach(requestMissingHistory)
         redraw()
         noteFrame()
       case None => pendingDamage = (pendingDamage :+ damage).takeRight(maxPendingDamage)
@@ -350,6 +418,77 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       model = Some(next)
       updateScrollbar(next)
     }
+
+  // --- pointer encoding -------------------------------------------------------------------------------------------------------------
+
+  /** The tracking mode the program asked for, or `None` when the mouse belongs to the view. Scrollback has no live grid to report cells
+    * against, so the wheel and drag stay local there. `Focus` is a focus-report mode, not a pointer mode.
+    */
+  private def reportingMode: Option[MouseMode] =
+    if end.nonEmpty then None
+    else
+      model
+        .filter(_.isLive)
+        .map(_.frame.modes.mouseMode)
+        .filter(mode => mode != MouseMode.Off && mode != MouseMode.Focus)
+
+  /** A modifier-held drag is a selection, the way a terminal's own override works: it keeps text selectable while a full-screen program has
+    * mouse reporting enabled.
+    */
+  private def forcesSelection(event: javafx.scene.input.MouseEvent): Boolean =
+    event.isShiftDown || event.isAltDown
+
+  private def forcesSelection(event: ScrollEvent): Boolean =
+    event.isShiftDown || event.isAltDown
+
+  private def insideCanvas(x: Double, y: Double): Boolean =
+    canvas.getWidth > 0 && canvas.getHeight > 0 && x >= 0 && y >= 0 && x < canvas.getWidth && y < canvas.getHeight
+
+  private def terminalButton(button: JfxMouseButton): Option[MouseButton] =
+    button match
+      case JfxMouseButton.PRIMARY   => Some(MouseButton.Left)
+      case JfxMouseButton.MIDDLE    => Some(MouseButton.Middle)
+      case JfxMouseButton.SECONDARY => Some(MouseButton.Right)
+      case _                        => None
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      event: javafx.scene.input.MouseEvent
+  ): Unit =
+    sendMouse(x, y, button, action, event.isShiftDown, event.isAltDown, event.isControlDown)
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      event: ScrollEvent
+  ): Unit =
+    sendMouse(x, y, button, action, event.isShiftDown, event.isAltDown, event.isControlDown)
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      shift: Boolean,
+      alt: Boolean,
+      control: Boolean
+  ): Unit =
+    val position = canvas.positionAt(x, y)
+    calls.mouse(
+      session,
+      MouseInput(
+        column = position.col,
+        row = position.row,
+        button = button,
+        action = action,
+        modifiers = MouseModifiers(shift = shift, alt = alt, control = control)
+      )
+    )
 
   // --- painting and layout ---------------------------------------------------------------------------------------------------------
 
@@ -365,6 +504,17 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
         canvas.setBlinking(shouldBlink)
       canvas.show(current, selection)
     }
+
+  /** Asks the host for the part of the scrollback this viewport now needs. The request is deduped until an answer lands, because a reader
+    * who is scrolled back while a command produces output would otherwise ask again on every damage tick.
+    */
+  private def requestMissingHistory(model: ScreenModel): Unit =
+    val wanted =
+      if model.missingHistory > 0 then Some((1, math.min(model.maxScroll, model.scrollOffset + model.rows)))
+      else None
+    if wanted != historyRequest then
+      historyRequest = wanted
+      wanted.foreach((from, count) => calls.history(session, from, count))
 
   /** The scrollbar is managed exactly while it is visible, so showing or hiding it changes the content area the grid is computed from. That
     * is a layout change the window's size listeners never see, so the transition arms the same debounce a window resize does; the request

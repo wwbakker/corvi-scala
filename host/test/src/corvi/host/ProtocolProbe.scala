@@ -289,10 +289,11 @@ object ProtocolProbe:
       )
 
       listed <- client.list
+      listedEnd = listed.find(_.id == main)
       _ = report(
-        "an ended session stays listed, so a tab can show its final screen",
-        listed.exists(entry => entry.id == main && !entry.running),
-        s"${listed.map(entry => s"${entry.id.value}: running ${entry.running}").mkString(", ")}"
+        "an ended session stays listed with its end, so a reattaching tab can show both",
+        listedEnd.exists(entry => !entry.running && entry.ended.exists(_.code.contains(0))),
+        s"${listedEnd.map(entry => s"running ${entry.running}, ended ${entry.ended.map(describe)}").getOrElse("missing")}"
       )
 
       // A shell that is gone takes no input and no resize, and says so in a type rather than an exception.

@@ -15,6 +15,11 @@ val javafxClassifier: String =
 
 val javafxVersion: String = "26"
 
+/** JavaFX's Linux X11 backend tries GLX first; on this display server that cannot create a context and leaves a native error in the log.
+  * The terminal is a text canvas, so software rendering is both sufficient and what the TestFX suite already uses.
+  */
+val linuxSoftwareRendering: Boolean = sys.props("os.name").toLowerCase.contains("linux")
+
 /** Mill parses one exclusion per `;exclude=` segment; a comma-separated list is silently read as a single bogus exclusion, so each one
   * needs its own segment.
   */
@@ -236,7 +241,7 @@ object app extends ScalaModule:
   def forkArgs = Seq(
     "-Dkyo.scheduler.virtualizeWorkers=true",
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
-  )
+  ) ++ Option.when(linuxSoftwareRendering)("-Dprism.order=sw")
 
   /** The window's tests: the TestFX suite that drives the real daemon-backed window, plus the probes and harnesses that used to live in
     * this module. TestFX and JUnit appear here and nowhere else — the `app` module itself has no test dependency.

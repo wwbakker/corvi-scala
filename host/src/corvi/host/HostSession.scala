@@ -54,7 +54,10 @@ private[corvi] final class HostSession private[host] (
   /** The shell's process id, which is what a reattaching client compares to be sure it found the same shell. */
   def shellPid: Long = process.pid()
 
-  def info: SessionInfo = ScreenReader.info(id, index, buffer, process.isAlive, shellPid = process.pid())
+  def info: SessionInfo =
+    val running = process.isAlive
+    val ended = if running then None else Some(Ended(code = exitCode, closed = false, reason = error.map(_.toString)))
+    ScreenReader.info(id, index, buffer, running, shellPid = process.pid(), ended = ended)
 
   /** The visible grid, the cursor, the modes, the history's depth and the theme, as one value, read at one instant. */
   def snapshot(): Snapshot = ScreenReader.snapshot(id, buffer, display, theme)
@@ -97,6 +100,13 @@ private[corvi] final class HostSession private[host] (
 
   /** Types at the shell, for the headless checks. The UI's key encoding lives here too, later. */
   def write(text: String): Unit = connector.write(text)
+
+  /** Sends a pointer event in the session's current tracking mode. The mode is read from the display at the moment the event arrives, so a
+    * program that enables SGR or switches from click to any-motion tracking gets the encoding it asked for.
+    */
+  def mouse(input: MouseInput): Unit =
+    val state = display.state
+    MouseEncoder.encode(input, state.mouseMode, state.mouseFormat).foreach(bytes => connector.write(bytes))
 
   /** jeditermfx-core's emulator loop, on the fiber that owns this session: the work `TerminalStarter.doStartEmulator` does, without the
     * thread it starts for it.

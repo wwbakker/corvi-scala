@@ -53,6 +53,12 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     baseFocus = focused
     if focusOverride.isEmpty then repaint()
 
+  /** Stops the one animation this canvas owns. A view removes its node from the scene when its tab closes; a timeline that is still playing
+    * would keep the canvas alive after that.
+    */
+  def dispose(): Unit =
+    blink.stop()
+
   /** Focus as an override, for a harness without a window manager. */
   def showFocus(focused: Boolean): Unit =
     focusOverride = Some(focused)

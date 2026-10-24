@@ -27,6 +27,9 @@ private[corvi] object HostRoutes:
         if connection.authorize(params.token) then Sync.defer(()) else Abort.fail(Unauthorized("the token does not match"))
       ),
       JsonRpcRoute.request[Unit, HostStatus](Methods.Status)((_, _) => guarded(connection)(status(host, startedAt))),
+      JsonRpcRoute.request[Unit, HostIdentity](Methods.Identity)((_, _) =>
+        guarded(connection)(Sync.defer(HostIdentity(ProcessHandle.current().pid(), HostBuild.current)))
+      ),
       JsonRpcRoute.request[Unit, Unit](Methods.Stop)((_, _) => guarded(connection)(requestStop)),
       JsonRpcRoute.request[Unit, Seq[SessionInfo]](Methods.List)((_, _) => guarded(connection)(host.list)),
       JsonRpcRoute.request[CreateParams, SessionInfo](Methods.Create)((params, _) =>
@@ -40,6 +43,7 @@ private[corvi] object HostRoutes:
       ),
       JsonRpcRoute.request[SessionParams, Unit](Methods.Close)((params, _) => guarded(connection)(host.close(params.id))),
       JsonRpcRoute.request[TextParams, Unit](Methods.Text)((params, _) => guarded(connection)(host.text(params.id, params.text))),
+      JsonRpcRoute.request[MouseParams, Unit](Methods.Mouse)((params, _) => guarded(connection)(host.mouse(params.id, params.input))),
       JsonRpcRoute.request[ResizeParams, Unit](Methods.Resize)((params, _) => guarded(connection)(host.resize(params.id, params.size)))
     ).map(route =>
       route

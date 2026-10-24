@@ -7,7 +7,7 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.application.Platform
 import javafx.event.Event
 import javafx.scene.Scene
-import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent}
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, MouseButton as JfxMouseButton, MouseEvent, ScrollEvent}
 import javafx.stage.Stage
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test, TestInstance}
@@ -15,11 +15,11 @@ import org.junit.jupiter.api.extension.ExtendWith
 import org.testfx.framework.junit5.{ApplicationExtension, Start}
 import scala.jdk.CollectionConverters.*
 
-/** The key path: what a keystroke sends to the session, and which chords belong to the window instead.
+/** The key and pointer path: what input sends to the session, and which gestures belong to the window instead.
   *
   * A fake `SessionCalls` records exactly what would have gone to the host, and a seeded `Snapshot` gives the view something to select, so
   * every check here is about the view's own encoding — no PTY, no daemon, no window manager. The scene's chord machine is covered in
-  * `ui.test`; this is where Control+letter becomes a byte and Command+C becomes a copy.
+  * `ui.test`; this is where Control+letter becomes a byte, a mouse report becomes a cell and button, and Command+C becomes a copy.
   */
 @ExtendWith(Array(classOf[ApplicationExtension]))
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -27,13 +27,19 @@ final class KeyTest:
 
   private final class RecordingCalls extends SessionCalls:
     private val texts = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    private val mice = new java.util.concurrent.ConcurrentLinkedQueue[MouseInput]()
 
     def sent: Vector[String] = texts.iterator.asScala.toVector
-    def reset(): Unit = texts.clear()
+    def mouseEvents: Vector[MouseInput] = mice.iterator.asScala.toVector
+    def reset(): Unit =
+      texts.clear()
+      mice.clear()
 
     def attach(session: SessionId, events: SessionEvents): Unit = ()
     def text(session: SessionId, text: String): Unit =
       val _ = texts.add(text)
+    def mouse(session: SessionId, input: MouseInput): Unit =
+      val _ = mice.add(input)
     def resize(session: SessionId, size: TermSize): Unit = ()
     def history(session: SessionId, from: Int, count: Int): Unit = ()
     def close(session: SessionId): Unit = ()
@@ -152,6 +158,58 @@ final class KeyTest:
     press(KeyCode.SLASH, control = true, shift = true)
     assertEquals(Vector("\u001f", "\u007f"), calls.sent)
 
+  @Test
+  def `a click in mouse-reporting mode sends a press and a release`(): Unit =
+    clear()
+    onFx(view.get().getOrElse(fail("no terminal")).attached(snapshot("hello world", MouseMode.Click, MouseFormat.Sgr)))
+    fireMouse(MouseEvent.MOUSE_PRESSED, JfxMouseButton.PRIMARY, 5, 5)
+    fireMouse(MouseEvent.MOUSE_RELEASED, JfxMouseButton.PRIMARY, 5, 5)
+    assertEquals(
+      Vector(
+        MouseInput(0, 0, Some(MouseButton.Left), MouseAction.Press, MouseModifiers(false, false, false)),
+        MouseInput(0, 0, Some(MouseButton.Left), MouseAction.Release, MouseModifiers(false, false, false))
+      ),
+      calls.mouseEvents
+    )
+
+  @Test
+  def `the wheel goes to a mouse-aware program instead of the scrollback`(): Unit =
+    clear()
+    onFx(view.get().getOrElse(fail("no terminal")).attached(snapshot("hello world", MouseMode.Click, MouseFormat.Sgr)))
+    fireScroll(deltaY = 3)
+    assertEquals(
+      Vector(MouseInput(0, 0, Some(MouseButton.WheelUp), MouseAction.Press, MouseModifiers(false, false, false))),
+      calls.mouseEvents
+    )
+    assertEquals(0, onFx(view.get().flatMap(_.screen).map(_.scrollOffset).getOrElse(-1)))
+
+  @Test
+  def `without mouse reporting the view keeps the click for selection`(): Unit =
+    clear()
+    fireMouse(MouseEvent.MOUSE_PRESSED, JfxMouseButton.PRIMARY, 5, 5)
+    fireMouse(MouseEvent.MOUSE_DRAGGED, JfxMouseButton.PRIMARY, 15, 5)
+    assertTrue(calls.mouseEvents.isEmpty)
+    assertTrue(onFx(view.get().flatMap(_.selectedText)).exists(text => text.startsWith("h")))
+
+  @Test
+  def `an ended session takes no keys, paste or mouse reports`(): Unit =
+    clear()
+    val ended = onFx {
+      val terminal = TerminalView(calls, SessionId("ended"), TerminalMetrics.monospaced(13))
+      terminal.attached(snapshot("hello world", MouseMode.Click, MouseFormat.Sgr))
+      terminal.sessionEnded(Ended(code = Some(0), closed = false, reason = None))
+      terminal
+    }
+    onFx {
+      Event.fireEvent(ended, new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.C, false, true, false, false))
+      Event.fireEvent(ended, new KeyEvent(KeyEvent.KEY_TYPED, "x", "", KeyCode.UNDEFINED, false, false, false, false))
+    }
+    fireMouseOn(ended, MouseEvent.MOUSE_PRESSED, JfxMouseButton.PRIMARY, 5, 5)
+    fireScrollOn(ended, 3)
+    assertEquals(Vector.empty, calls.sent)
+    assertTrue(calls.mouseEvents.isEmpty)
+    onFx(ended.dispose())
+
   // --- helpers -----------------------------------------------------------------------------------------------------------------------
 
   @BeforeEach
@@ -199,17 +257,86 @@ final class KeyTest:
       )
     }
 
-  private def snapshot(text: String): Snapshot =
+  private def snapshot(
+      text: String,
+      mode: MouseMode = MouseMode.Off,
+      format: MouseFormat = MouseFormat.X10
+  ): Snapshot =
     val cells = text.map(character => Cell(character.toString, CellWidth.Narrow, None, None, false, false, false, false)).toVector
     Snapshot(
       id = SessionId("key-test"),
       size = TermSize(cols = cells.size, rows = 1),
       rows = Vector(Row(cells)),
       cursor = Cursor(0, 0, None, blinking = false, visible = true),
-      modes = Modes(alternateScreen = false, MouseMode.Off, MouseFormat.X10, bracketedPaste = false, title = ""),
+      modes = Modes(alternateScreen = false, mode, format, bracketedPaste = false, title = ""),
       historyRows = 0,
       theme = TerminalTheme(Rgb(255, 255, 255), Rgb(0, 0, 0))
     )
+
+  private def fireMouse(kind: javafx.event.EventType[MouseEvent], button: JfxMouseButton, x: Double, y: Double): Unit =
+    fireMouseOn(view.get().getOrElse(fail("no terminal")), kind, button, x, y)
+
+  private def fireMouseOn(
+      target: TerminalView,
+      kind: javafx.event.EventType[MouseEvent],
+      button: JfxMouseButton,
+      x: Double,
+      y: Double
+  ): Unit =
+    val _ = onFx {
+      val event = new MouseEvent(
+        kind,
+        x,
+        y,
+        x,
+        y,
+        button,
+        1,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        null
+      )
+      Event.fireEvent(target, event)
+    }
+
+  private def fireScroll(deltaY: Double): Unit =
+    fireScrollOn(view.get().getOrElse(fail("no terminal")), deltaY)
+
+  private def fireScrollOn(target: TerminalView, deltaY: Double): Unit =
+    val _ = onFx {
+      val event = new ScrollEvent(
+        ScrollEvent.SCROLL,
+        5,
+        5,
+        5,
+        5,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        0,
+        deltaY,
+        0,
+        deltaY,
+        ScrollEvent.HorizontalTextScrollUnits.NONE,
+        0,
+        ScrollEvent.VerticalTextScrollUnits.NONE,
+        0,
+        0,
+        null
+      )
+      Event.fireEvent(target, event)
+    }
 
   private def onFx[A](action: => A): A =
     if Platform.isFxApplicationThread then action

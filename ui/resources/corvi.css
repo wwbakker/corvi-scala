@@ -209,6 +209,10 @@
 
 /* The Overview tab's content. The title rule has to come after the generic `.label` one: JavaFX
    has no `:not()`, and it ranks the two equally. */
+.overview-placeholder {
+    -fx-padding: 16 20;
+}
+
 .overview-placeholder .label {
     -fx-text-fill: -fx-corvi-faint;
     -fx-font-size: 12px;

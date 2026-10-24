@@ -23,6 +23,10 @@ object Schemas:
   given Schema[Cursor] = Schema.derived
   given Schema[MouseMode] = Schema.derived
   given Schema[MouseFormat] = Schema.derived
+  given Schema[MouseButton] = Schema.derived
+  given Schema[MouseAction] = Schema.derived
+  given Schema[MouseModifiers] = Schema.derived
+  given Schema[MouseInput] = Schema.derived
   given Schema[Modes] = Schema.derived
   given Schema[Snapshot] = Schema.derived
   given Schema[RowDamage] = Schema.derived
@@ -49,6 +53,9 @@ object Schemas:
 
 /** What the daemon says about itself: enough for a client to tell it is talking to the host it left, and how much that host is holding. */
 final case class HostStatus(pid: Long, sessions: Int, uptimeMillis: Long) derives Schema, CanEqual
+
+/** The daemon's build fingerprint, so a UI can replace a daemon left over from an older build instead of talking to it indefinitely. */
+final case class HostIdentity(pid: Long, build: String) derives Schema, CanEqual
 
 /** What `SessionFailed` puts on the wire. */
 final case class FailurePayload(id: String, reason: String) derives Schema, CanEqual

@@ -502,6 +502,9 @@ final class UiTest:
     */
   private def stopHost(): Unit =
     val paths = HostPaths.defaultPaths()
+    // The graceful path first: it also works when the command-line check below cannot identify the process.
+    if stillListening(paths) then
+      val _ = stopDaemon(paths)
     destroyMarked(paths)
     awaitGone(paths)
     deleteTree(paths.directory)
@@ -530,7 +533,10 @@ final class UiTest:
   private def destroyMarked(paths: HostPaths): Unit =
     paths.owner().foreach { pid =>
       ProcessHandle.of(pid).ifPresent { handle =>
-        val named = handle.info().commandLine().orElse("").contains("corvi.host.HostMain")
+        val commandLine = handle.info().commandLine().orElse("")
+        // A daemon started by this build has the marker in its JVM flags. The main-class check stays for a short classpath, where the
+        // command line is not truncated before the end.
+        val named = commandLine.contains("-Dcorvi.host.daemon=true") || commandLine.contains("corvi.host.HostMain")
         if named then
           val _ = handle.destroy()
           try

@@ -40,6 +40,18 @@ object HostDaemonProbe:
         s"socket $socket"
       )
 
+      val identity = runSession(paths) { client =>
+        for
+          _ <- client.hello(token)
+          found <- client.identity
+        yield found
+      }
+      reporter.report(
+        "the daemon reports the build the UI compares against",
+        identity.exists(found => found.build == HostBuild.current && found.pid == host.map(_.pid()).getOrElse(-1L)),
+        identity.map(found => s"pid ${found.pid}, build ${found.build}").getOrElse("no identity")
+      )
+
       // The daemon's pushes: a client that only attached must be handed damage as the shell writes, without asking for it again. Nothing
       // in this probe used to look at a client's sink, which is how a client that never heard a push could pass every check above.
       val pushed = runKyo {

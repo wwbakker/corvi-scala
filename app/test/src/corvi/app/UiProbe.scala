@@ -168,6 +168,31 @@ object UiProbe:
         s"${onFx(tabLabelText(shell, 1))}"
       )
 
+      // A fresh UI lists the ended session with its end. Opening that session must bring the tab back ended, not looking like it still runs.
+      val endedSession = sessionOf(shell, ending)
+      val endedInfo = listSessions(running).flatMap(_.find(_.id == endedSession))
+      val reattached = endedInfo.exists { info =>
+        val reopened = onFx {
+          val view = ShellView(factory)
+          view.open(info)
+          view
+        }
+        val window = onFx(reopened.current.windows.headOption.map(entry => (entry.state, entry.ending)))
+        onFx(reopened.dispose())
+        window.exists { case (state, end) =>
+          state == TerminalWindow.State.Ended &&
+          end.exists {
+            case Ending.Exited(Some(_)) => true
+            case _                      => false
+          }
+        }
+      }
+      reporter.report(
+        "a reattached ended session is ended, with its code",
+        reattached,
+        endedInfo.map(info => s"running ${info.running}, ended ${info.ended}").getOrElse("the ended session is not listed")
+      )
+
       // The label cascade: an ended tab is faint while you are not looking at it, and keeps its current colour when you are.
       reporter.report(
         "an ended tab in the background is quiet",
@@ -188,11 +213,14 @@ object UiProbe:
       onFx(rightClick(windowTab(shell, 2)))
       val menuFired = onFx(fireCloseMenuItem())
       val closed = poll(waitTimeout)(onFx(shell.current.windows.size) == 2)
-      val sessionsAfter = listSessions(running).getOrElse(Vector.empty)
+      // The tab disappears before the host's close request comes back: poll the host, rather than reading the list in the same tick.
+      val sessionGone = poll(waitTimeout)(
+        listSessions(running).exists(sessions => !sessions.exists(_.id == closingSession))
+      )
       reporter.report(
         "the context menu's Close tab closes the window and ends the session",
-        menuFired && closed && !sessionsAfter.exists(_.id == closingSession),
-        s"fired $menuFired, windows ${onFx(shell.current.windows.size)}"
+        menuFired && closed && sessionGone,
+        s"fired $menuFired, windows ${onFx(shell.current.windows.size)}, session gone $sessionGone"
       )
       reporter.report(
         "and the closed tab leaves the client's sink",
