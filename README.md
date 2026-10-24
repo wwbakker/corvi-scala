@@ -76,11 +76,11 @@ failure.
 ./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
 ./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
-./mill -i renderer.test                                 # 14 JUnit tests: ScreenModel, Layout, Selection
-./mill -i host.test                                     # 13 JUnit tests: registry, concurrent binds, mouse encoding
+./mill -i renderer.test                                 # 37 JUnit tests: ScreenModel, Layout, Selection, key mapping
+./mill -i host.test                                     # JUnit tests: registry, concurrent binds, mouse and key encoding
 ./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
-./mill -i host.test.runMain corvi.host.HostProbe        # 49 checks: PTY, VT emulation, snapshot/damage, history, resize
-./mill -i host.test.runMain corvi.host.ProtocolProbe    # 30 checks: routes, typed errors, auth, pushes, reconnects
+./mill -i host.test.runMain corvi.host.HostProbe        # 52 checks: PTY, VT emulation, keys, snapshot/damage, history, resize
+./mill -i host.test.runMain corvi.host.ProtocolProbe    # 31 checks: routes, typed errors, auth, pushes, reconnects
 ./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
 ./mill -i app.test.runMain corvi.app.RendererProbe      # 34 checks: the renderer, selection, scrollback, captures
 ./mill -i app.test.runMain corvi.app.UiProbe            # 30 checks: the window, tabs, chords, bells, menus, drag
@@ -143,13 +143,26 @@ does the rest. Copy and paste are the window's own chords: **⌘C / ⌘V on macO
 elsewhere. Ctrl+C is never a copy chord; the plain printable keys, Shift-only characters, Backspace (`^?`), Enter, Tab and Escape are
 forwarded as before, and a shortcut's typed companion (the `c` the platform sends after ⌘C) is swallowed rather than typed.
 
-**Option-composed characters pass through**: Option+E / Option+U / Option+A / Option+5 / Option+G enter é/ü/å/∞/© as the platform composes
-them, because Alt is not treated as a shortcut here — its `KEY_TYPED` is the text. Alt-as-Meta/Alt-as-Escape is **not** forwarded: Alt is
-passed as a composed character, not as the terminal's Meta prefix.
+**Arrows, navigation, function keys and modified keys work.** Up/Down/Left/Right, Home/End, PageUp/PageDown, Insert/Delete, F1–F12,
+Shift+Tab and their Shift/Control/Alt/Meta combinations go through the host's `session.key` route. The host uses JediTermFX's own key
+encoder, so the bytes follow the session's modes: DECCKM's `ESC O A` versus `ESC [ A`, xterm's `CSI 1;N` modifier suffixes, and `ESC [ Z`
+for Shift+Tab. The renderer sends the semantic key (`TerminalKey` + `KeyModifiers`); it does not invent escape strings. Backspace (`^?`),
+Enter, Tab and Escape keep their direct bytes, and plain printable text (including Shift-only characters) still goes through
+`session.text`. The byte-level and Pi smoke evidence is in [docs/key-input.md](docs/key-input.md).
+
+**Alt/Option has a deliberate mode.** `Compose` preserves the old behaviour: Option+E / Option+U / Option+A / Option+5 / Option+G enter
+é/ü/å/∞/© as the platform composes them, because the composed `KEY_TYPED` is the text. `Meta` and `Escape` treat Alt+printable as
+Meta+key and send `ESC` followed by the character; the host adds the prefix. Alt+special keys always use the key encoder, so Alt+Left is
+the modified arrow rather than a composed character. The renderer's Alt+printable table follows the US layout for shifted digits and
+punctuation, so Alt+Shift+1 is `!` even on another layout; a key outside the table falls back to the platform's typed character. The
+default is `Compose` on macOS, where Option composes accents, and `Escape` elsewhere. Until there is a settings UI, set
+`CORVI_ALT_MODE=compose`, `meta` or `escape` (or `-Dcorvi.altMode=...`) before starting the app. One known limitation: where a platform
+reports AltGr as Control+Alt, the non-Compose Alt modes currently swallow its composed typed character; Alt-only composition in Compose
+mode is unaffected. Keypad keys are not part of this slice: the engine has only keypad cursor constants, which duplicate the arrows, and
+no keypad digits or Enter.
 
 Paste is **not** wrapped in bracketed-paste escapes: a multi-line paste runs each line, so pasting a script executes it (Corvi's own
-bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. **Arrow keys and
-modified function keys are still not forwarded**: they need a mode-dependent `session.key` route, which is a renderer follow-up.
+bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`.
 
 **Mouse reports are forwarded** when the program asks for them (`1000`, `1001`, `1002`, `1003`): clicks, drags and the wheel are encoded by
 the host in the session's format (`1005`, `1006`, `1015` or X10), so a TUI such as Pi works as it does in Corvi. Shift-drag, or Option-drag
@@ -262,8 +275,6 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **Arrow keys and modified function keys are not forwarded** (see [Keys](#keys)). Control keys, copy and paste, and mouse reports are;
-  the mode-dependent key encoding is still the host's future.
 - **No find, no hyperlinks** in the renderer, and no IME.
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.

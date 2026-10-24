@@ -34,6 +34,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
     */
   private val mouseUnavailable: AtomicBoolean = new AtomicBoolean(false)
 
+  /** The same for `session.key`, so an older daemon does not report once per arrow key. */
+  private val keyUnavailable: AtomicBoolean = new AtomicBoolean(false)
+
   /** A new session at this grid, delivered on the FX thread: `None` when the host refused, and nothing is shown until it arrives. */
   def create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit): Unit =
     offer(Command.Create(cwd, size, onCreated))
@@ -49,6 +52,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   def mouse(session: SessionId, input: MouseInput): Unit =
     if !mouseUnavailable.get() then offer(Command.Mouse(session, input))
+
+  def key(session: SessionId, input: KeyInput): Unit =
+    if !keyUnavailable.get() then offer(Command.Key(session, input))
 
   def resize(session: SessionId, size: TermSize): Unit = offer(Command.Resize(session, size))
 
@@ -87,7 +93,12 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
             perform(events.get(id), "text")(service.text(id, text)).map(_ => (events, false))
           case Some(Command.Mouse(_, _)) if mouseUnavailable.get() => Sync.defer((events, false))
           case Some(Command.Mouse(id, input))                      =>
-            performedMouse(events.get(id), service.mouse(id, input)).map(_ => (events, false))
+            performedCapability(events.get(id), "mouse", mouseUnavailable, unsupportedMouse)(service.mouse(id, input))
+              .map(_ => (events, false))
+          case Some(Command.Key(_, _)) if keyUnavailable.get() => Sync.defer((events, false))
+          case Some(Command.Key(id, input))                    =>
+            performedCapability(events.get(id), "key", keyUnavailable, unsupportedKey)(service.key(id, input))
+              .map(_ => (events, false))
           case Some(Command.Resize(id, size)) =>
             perform(events.get(id), "resize")(service.resize(id, size)).map(_ => (events, false))
           case Some(Command.History(id, from, count)) =>
@@ -161,38 +172,43 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
   ): Unit < Async =
     performed(events, label)(operation)(_ => ())
 
-  /** Mouse failures are reported once when they mean the host predates the route. A per-event report would print once per pointer move,
-    * which is exactly what an old daemon would otherwise cause while a TUI is running.
-    */
   /** A command that raced the session's end is not a failure to print: the tab is already ended and the screen stays usable. */
   private def sessionGone(error: TerminalError | Closed): Boolean =
     error match
       case SessionEnded(_) | UnknownSession(_) => true
       case _                                   => false
 
-  private def performedMouse(events: Option[SessionEvents], operation: Unit < (Async & Abort[TerminalError | Closed]))(using
-      Frame
-  ): Unit < Async =
+  private val unsupportedMouse: String = "the host does not support mouse reports; restart it to load session.mouse"
+  private val unsupportedKey: String = "the host does not support key input; restart it to load session.key"
+
+  /** A route the host may predate is reported once when it is missing, not once per event: an old daemon would otherwise print on every
+    * pointer move or arrow key while a TUI is running.
+    */
+  private def performedCapability(
+      events: Option[SessionEvents],
+      label: String,
+      unavailable: AtomicBoolean,
+      unsupported: String
+  )(operation: Unit < (Async & Abort[TerminalError | Closed]))(using Frame): Unit < Async =
     for
       outcome <- Abort.run[TerminalError | Closed](operation)
       _ <- outcome match
-        case Result.Success(_)                                                           => Sync.defer(())
-        case Result.Failure(RemoteError(_, label)) if label.contains("Method not found") =>
+        case Result.Success(_)                                                                       => Sync.defer(())
+        case Result.Failure(RemoteError(_, description)) if description.contains("Method not found") =>
           Sync.defer {
-            if mouseUnavailable.compareAndSet(false, true) then
-              val message = "the host does not support mouse reports; restart it to load session.mouse"
-              report(message)
-              events.foreach(target => onFx(() => target.failed(message)))
+            if unavailable.compareAndSet(false, true) then
+              report(unsupported)
+              events.foreach(target => onFx(() => target.failed(unsupported)))
           }
         case Result.Failure(error) =>
           Sync.defer {
-            report(s"mouse failed: $error")
-            events.foreach(target => onFx(() => target.failed(s"mouse failed: $error")))
+            report(s"$label failed: $error")
+            events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
           }
         case Result.Panic(error) =>
           Sync.defer {
-            report(s"mouse panicked: $error")
-            events.foreach(target => onFx(() => target.failed(s"mouse panicked: $error")))
+            report(s"$label panicked: $error")
+            events.foreach(target => onFx(() => target.failed(s"$label panicked: $error")))
           }
     yield ()
 
@@ -227,6 +243,7 @@ private[app] object Client:
     case Attach(session: SessionId, events: SessionEvents)
     case Text(session: SessionId, text: String)
     case Mouse(session: SessionId, input: MouseInput)
+    case Key(session: SessionId, input: KeyInput)
     case Resize(session: SessionId, size: TermSize)
     case History(session: SessionId, from: Int, count: Int)
 

@@ -22,6 +22,9 @@ object Messages:
   /** `session.mouse`: one pointer event, in cells, for the host to encode in the session's current mouse mode. */
   final case class MouseParams(id: SessionId, input: MouseInput) derives Schema, CanEqual
 
+  /** `session.key`: one non-text key, for the host to encode in the session's current key modes. */
+  final case class KeyParams(id: SessionId, input: KeyInput) derives Schema, CanEqual
+
   /** `session.resize`: the grid the client wants. */
   final case class ResizeParams(id: SessionId, size: TermSize) derives Schema, CanEqual
 

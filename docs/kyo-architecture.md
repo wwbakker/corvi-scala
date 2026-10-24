@@ -55,8 +55,8 @@ The **host interprets the terminal**; the frontend only renders it.
   from the most recent.
 - `session.mouse(id, input)` — one pointer event in terminal cells. The host owns the encoding because it knows the mouse mode and format
   the program enabled (`1000`/`1001`/`1002`/`1003` and `1005`/`1006`/`1015`/X10).
-- `session.key(id, keyCode, modifiers, text)` / `session.resize(id, cols, rows)` — key encoding is still planned; resize is applied by the
-  host.
+- `session.key(id, input)` — one semantic key (`TerminalKey` + `KeyModifiers`). The host owns the encoding because it knows DECCKM, the
+  application-arrow mode, and xterm's modifier rules. `session.resize(id, cols, rows)` is applied by the host.
 - `session.ended(id, ended)` — once per attached client: `closed` says who ended it, `code` is
   advisory, `reason` carries a reader failure. `sessions.list`, `session.create`, `session.close`.
 - Base64 cell payloads first; a compact binary framing can replace them later without changing
@@ -70,9 +70,10 @@ The **host interprets the terminal**; the frontend only renders it.
   `ClientRoutes` — all in `protocol`. The host's answering routes are `HostRoutes` in `host`,
   because they need the live sessions. `session.text`/`session.mouse`/`session.resize` are requests,
   not notifications: a client wants to know when the host no longer has the session. `text` is
-  paste-only; mouse input carries cells and buttons and the host encodes it in the mode and format
-  the program enabled. `session.key` is still planned because arrow and modified function keys need
-  the same mode-dependent treatment.
+  paste-only and carries printable input; mouse input carries cells and buttons and the host encodes
+  it in the mode and format the program enabled. Key input carries a semantic `TerminalKey` and its
+  modifiers; the host's `KeyEncoder` maps it to JediTermFX's encoder, which supplies DECCKM, the
+  `CSI 1;N` suffixes and Shift+Tab, with small fallbacks for Escape and plain Tab.
 - **`protocol` depends on `contract` and `kyo-jsonrpc` only**; `host` depends on `protocol`. A UI
   build therefore takes the client half without pty4j, jeditermfx or the host's JVM flags. For the
   same reason the protocol probe lives in `host` (`corvi.host.ProtocolProbe`): it needs real shells.
@@ -167,8 +168,8 @@ a supervisor fiber per host with its own scope, and the ended-session reap polic
   exactly two cells wide, wrong for one where they are not. No fallback font, per-script shaping or emoji presentation.
 - History is refetched wholesale (`from = 1`, `count = offset + rows`) rather than paged incrementally, copied text loses wrapping and has
   no line join, and a resize while scrolled back does not reflow history.
-- Input is paste, edit and mouse reports (see above); arrows and modified keys still need the host's key encoder. The clipboard write is
-  unchecked because the probe machine is headless, and the probe asserts the copied text rather than the system clipboard.
+- Input is text, named keys and mouse reports (see above); the clipboard write is unchecked because the probe machine is headless, and the
+  probe asserts the copied text rather than the system clipboard.
 - Focus and blink are overridden for captures; neither is asserted against a real window manager, and the blink has no phase relationship
   with the host.
 
@@ -195,10 +196,16 @@ they start a real host.
   resize, history) to a blocking queue that one fiber drains, and every result and every push comes back through `Platform.runLater`. That is
   two hops in the whole renderer, and it is why `SessionEvents` can promise the FX thread and `FrameSink` is the only place that hops.
 - **Input.** Typed characters go out as `session.text`, and the editing keys — Backspace as `^?`, Enter as `\r`, Tab, Escape — are forwarded
-  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. **Mouse reporting is
-  forwarded** when the program enables it: the view maps a click, drag or wheel to a cell and a button, and the host encodes it in the
-  session's current mode/format. Shift/Option-drag forces a local selection; without mouse reporting, drag selects and the wheel scrolls the
-  local history. Arrows and modified keys still need `session.key`.
+  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. Arrows, navigation,
+  F1–F12, Shift+Tab and modified keys go through `session.key` as a `TerminalKey`; the host's `KeyEncoder` turns them into the session's
+  current sequences. Plain printable text, including Shift-only characters, stays on the text route. Alt has an application mode:
+  `Compose` keeps Option-composed characters as text, while `Meta`/`Escape` route Alt+printable through `session.key` and let the host
+  prepend the Meta escape; Alt+special keys always use the key route. The printable table follows the US layout for shifted digits and
+  punctuation; keys outside it use the platform's typed character. `CORVI_ALT_MODE` selects it until settings exist, defaulting to
+  `Compose` on macOS and `Escape` elsewhere. Keypad keys are left out: the engine has only keypad cursor constants, which duplicate the
+  arrows, and no keypad digits or Enter. **Mouse reporting is forwarded** when the program enables it: the view maps a click, drag or
+  wheel to a cell and a button, and the host encodes it in the session's current mode/format. Shift/Option-drag forces a local selection;
+  without mouse reporting, drag selects and the wheel scrolls the local history.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and

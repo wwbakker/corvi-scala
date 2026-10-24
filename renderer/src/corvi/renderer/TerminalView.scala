@@ -24,7 +24,7 @@ import scala.util.Try
   * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
   * full-screen program repainting on every step would be the expensive part.
   */
-final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics)
+final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics, altMode: AltMode = AltMode.configured)
     extends BorderPane
     with FrameSink
     with SessionEvents:
@@ -44,6 +44,11 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
+
+  /** An Alt+printable press was sent as a Meta key, so its typed companion is not a character. It is cleared by that companion, or by the
+    * next press when the platform sends none.
+    */
+  private var metaKeyTaken: Boolean = false
 
   /** Damage that arrived before the snapshot did: the host's first push can beat its own attach reply across two fibers, and the delta is
     * computed against the snapshot, so it is exactly what this view needs once seeded rather than something to drop.
@@ -108,13 +113,21 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
     // control codes the shell would not recognise (`\b` where macOS's `stty erase` expects `^?`). A Command or Control shortcut's typed
     // companion is ignored: the platform sends a KEY_TYPED for the same keystroke even when the window took it, and \u2318C must not also
-    // type a "c". Option is deliberately not in that test: an Option-composed character *is* this event, with Alt still down, and it is the
-    // text the shell should receive. Arrows are still not forwarded: they need the host's mode-dependent key encoding.
+    // type a "c". Option is only text in Compose mode: in Meta/Escape, the pressed key is sent through the key route and the platform's
+    // composed companion is swallowed.
     val _ = setOnKeyTyped { event =>
       val typed = event.getCharacter
       val shortcut = event.isMetaDown || event.isControlDown
-      if end.isEmpty && !shortcut && typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then
-        calls.text(session, typed)
+      if end.isEmpty then
+        if event.isAltDown && altMode != AltMode.Compose then
+          // The press normally took the key. If this platform sent no press the typed character is still the key, so it becomes printable
+          // input rather than falling through as composed text. A Control/Meta companion is a shortcut, not a Meta key: Ctrl+Alt and
+          // Cmd+Option must not leak an escape-prefixed letter, and AltGr's Control+Alt report must not either.
+          if !metaKeyTaken && !shortcut && isTypedText(typed) then
+            calls.key(session, KeyInput(TerminalKey.Printable(typed), keyModifiers(event)))
+          metaKeyTaken = false
+          event.consume()
+        else if !shortcut && isTypedText(typed) then calls.text(session, typed)
     }
     val _ = setOnKeyPressed { event =>
       val code = event.getCode
@@ -122,6 +135,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       val control = event.isControlDown
       val shift = event.isShiftDown
       val alt = event.isAltDown
+      metaKeyTaken = false
       // Copy and paste are the window's own chords, decided before anything is sent: a terminal keeps Ctrl+C for SIGINT, so copy is
       // Cmd+C (or Ctrl+Shift+C as the alias). Control codes then carry every other Control chord to the shell.
       if ControlKeys.isCopy(code, meta, control, shift, alt) then
@@ -139,8 +153,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
           case Some(bytes) =>
             event.consume()
             calls.text(session, bytes)
-          case None => editingKey(code, event)
-      else editingKey(code, event)
+          case None => nonControlKey(code, event)
+      else nonControlKey(code, event)
     }
     val _ = setOnMousePressed(event =>
       requestFocus()
@@ -262,6 +276,41 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   def pasteClipboard(): Unit =
     val pasted = Try(Option(Clipboard.getSystemClipboard().getString)).toOption.flatten.getOrElse("")
     if end.isEmpty && pasted.nonEmpty then calls.text(session, pasted)
+
+  /** A key the Control-byte table did not consume: a named key goes to the host's encoder, and Alt+printable becomes a Meta key in the
+    * modes that ask for it. The unmodified editing keys keep their direct bytes, which is the one path for them.
+    */
+  private def nonControlKey(code: KeyCode, event: javafx.scene.input.KeyEvent): Unit =
+    KeyMapping.terminalKey(code) match
+      case Some(key) if !KeyMapping.unmodifiedEditingKey(code) || modified(event) => sendKey(key, event)
+      case Some(_)                                                                => editingKey(code, event)
+      case None                                                                   =>
+        if altMode != AltMode.Compose && event.isAltDown && !event.isControlDown && !event.isMetaDown then
+          KeyMapping.printable(code, event.isShiftDown) match
+            case Some(text) =>
+              metaKeyTaken = true
+              event.consume()
+              calls.key(session, KeyInput(TerminalKey.Printable(text), keyModifiers(event)))
+            case None => editingKey(code, event)
+        else editingKey(code, event)
+
+  private def sendKey(key: TerminalKey, event: javafx.scene.input.KeyEvent): Unit =
+    event.consume()
+    calls.key(session, KeyInput(key, keyModifiers(event)))
+
+  private def keyModifiers(event: javafx.scene.input.KeyEvent): KeyModifiers =
+    KeyModifiers(
+      shift = event.isShiftDown,
+      alt = event.isAltDown,
+      control = event.isControlDown,
+      meta = event.isMetaDown
+    )
+
+  private def modified(event: javafx.scene.input.KeyEvent): Boolean =
+    event.isShiftDown || event.isAltDown || event.isControlDown || event.isMetaDown
+
+  private def isTypedText(typed: String): Boolean =
+    typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar
 
   /** The keys that are sent as themselves rather than as a character: Backspace is `^?` (what macOS's `stty erase` expects), and Enter, Tab
     * and Escape are the bytes a terminal sends for them.

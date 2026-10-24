@@ -1,7 +1,7 @@
 package corvi.app
 
 import corvi.contract.{TerminalView as ShellView, TerminalViewFactory, *}
-import corvi.renderer.{TerminalMetrics, TerminalView}
+import corvi.renderer.{AltMode, TerminalMetrics, TerminalView}
 import javafx.scene.Node as JfxNode
 
 /** The shell's view factory over the real client and renderer: one `TerminalView` per session, and the two session operations a tab needs.
@@ -12,7 +12,12 @@ import javafx.scene.Node as JfxNode
   * `create` and `close` hand their work to the client's runtime and return at once — a host that is slow or wedged must not freeze the
   * window. Results come back on the FX thread, which is where the shell and the hub both live.
   */
-private[app] final class RendererViewFactory(client: Client, metrics: TerminalMetrics, cwd: String) extends TerminalViewFactory[JfxNode]:
+private[app] final class RendererViewFactory(
+    client: Client,
+    metrics: TerminalMetrics,
+    cwd: String,
+    altMode: AltMode = AltMode.configured
+) extends TerminalViewFactory[JfxNode]:
 
   /** The grid the host gets when the window has not been laid out yet: the size this spike has always started a session at. A first tab
     * asked for before the stage is shown would otherwise be created at one cell per pixel value and then resized into the window.
@@ -20,7 +25,7 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
   private val defaultGrid: TermSize = TermSize(cols = 100, rows = 28)
 
   def open(info: SessionInfo, onActivity: () => Unit, onEnded: Ended => Unit): ShellView[JfxNode] =
-    val inner = TerminalView(client, info.id, metrics)
+    val inner = TerminalView(client, info.id, metrics, altMode)
     // Plugged before it asks for its snapshot: the host's first damage can otherwise arrive while the view is still absent from the sink.
     client.sink.plug(inner)
     inner.onOutput(onActivity)

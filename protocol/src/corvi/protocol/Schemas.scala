@@ -27,6 +27,9 @@ object Schemas:
   given Schema[MouseAction] = Schema.derived
   given Schema[MouseModifiers] = Schema.derived
   given Schema[MouseInput] = Schema.derived
+  given Schema[TerminalKey] = Schema.derived
+  given Schema[KeyModifiers] = Schema.derived
+  given Schema[KeyInput] = Schema.derived
   given Schema[Modes] = Schema.derived
   given Schema[Snapshot] = Schema.derived
   given Schema[RowDamage] = Schema.derived

@@ -119,6 +119,9 @@ private[corvi] final class HostSessions private (
   def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.mouse(input))
 
+  def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
+    live(id).map(managed => managed.session.key(input))
+
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.resize(size))
 

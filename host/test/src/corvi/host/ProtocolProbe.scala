@@ -152,6 +152,8 @@ object ProtocolProbe:
       )
       _ = report("and the deltas are deltas, not whole screens", widest < attached.size.rows, s"widest delta $widest")
 
+      _ <- keyWireCheck(client, cache, info.id, reporter)
+
       converged <- converges(client, cache, info.id)
       settled <- cache.frame(info.id)
       fresh <- client.attach(info.id)
@@ -167,6 +169,25 @@ object ProtocolProbe:
       _ = report("a damage row outside the grid is dropped, not thrown", dropped.contains(true), s"${dropped.map(_ => "unchanged")}")
 
     yield info.id
+
+  /** Keys over the wire: the host's encoder, not the client, turns them into the session's bytes. The printable case also proves the
+    * enum-with-payload survives the schema and that the Meta prefix is the host's.
+    */
+  private def keyWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command =
+      "stty raw -echo; printf 'WIRE_%s\\n' READY; dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+        "printf '\\nWIRE_%s\\n' DONE; stty sane\n"
+    for
+      _ <- client.text(id, command)
+      _ <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("WIRE_READY"))
+      _ <- client.key(id, KeyInput(TerminalKey.Up, KeyModifiers.none))
+      _ <- client.key(id, KeyInput(TerminalKey.Printable("a"), KeyModifiers(shift = false, alt = true, control = false, meta = false)))
+      keyed <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("WIRE_DONE"))
+      keyHex = keyed.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
+      _ = reporter.report("keys over the wire are encoded by the host", keyHex.contains("1b5b411b61"), keyHex.takeRight(30))
+    yield ()
 
   /** A height-only resize (where the rows that survive must not be blanked), a shrink, and history. */
   private def resizeAndHistoryChecks(client: TerminalService, cache: FrameCache, info: SessionInfo, reporter: Reporter)(using

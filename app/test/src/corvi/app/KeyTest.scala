@@ -1,7 +1,7 @@
 package corvi.app
 
 import corvi.contract.*
-import corvi.renderer.{CellPosition, SessionCalls, SessionEvents, TerminalMetrics, TerminalView}
+import corvi.renderer.{AltMode, CellPosition, SessionCalls, SessionEvents, TerminalMetrics, TerminalView}
 import java.util.concurrent.atomic.{AtomicReference}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import javafx.application.Platform
@@ -28,18 +28,23 @@ final class KeyTest:
   private final class RecordingCalls extends SessionCalls:
     private val texts = new java.util.concurrent.ConcurrentLinkedQueue[String]()
     private val mice = new java.util.concurrent.ConcurrentLinkedQueue[MouseInput]()
+    private val keys = new java.util.concurrent.ConcurrentLinkedQueue[KeyInput]()
 
     def sent: Vector[String] = texts.iterator.asScala.toVector
     def mouseEvents: Vector[MouseInput] = mice.iterator.asScala.toVector
+    def keyEvents: Vector[KeyInput] = keys.iterator.asScala.toVector
     def reset(): Unit =
       texts.clear()
       mice.clear()
+      keys.clear()
 
     def attach(session: SessionId, events: SessionEvents): Unit = ()
     def text(session: SessionId, text: String): Unit =
       val _ = texts.add(text)
     def mouse(session: SessionId, input: MouseInput): Unit =
       val _ = mice.add(input)
+    def key(session: SessionId, input: KeyInput): Unit =
+      val _ = keys.add(input)
     def resize(session: SessionId, size: TermSize): Unit = ()
     def history(session: SessionId, from: Int, count: Int): Unit = ()
     def close(session: SessionId): Unit = ()
@@ -53,7 +58,7 @@ final class KeyTest:
   @Start
   def start(stage: Stage): Unit =
     calls.reset()
-    val terminal = TerminalView(calls, SessionId("key-test"), TerminalMetrics.monospaced(13))
+    val terminal = TerminalView(calls, SessionId("key-test"), TerminalMetrics.monospaced(13), AltMode.Compose)
     val scene = new Scene(terminal, 800, 400)
     stage.setScene(scene)
     stage.show()
@@ -81,6 +86,154 @@ final class KeyTest:
     press(KeyCode.TAB)
     press(KeyCode.ESCAPE)
     assertEquals(Vector("\u007f", "\r", "\t", "\u001b"), calls.sent)
+
+  @Test
+  def `arrows and navigation keys go through the key route`(): Unit =
+    clear()
+    press(KeyCode.UP)
+    press(KeyCode.DOWN)
+    press(KeyCode.LEFT)
+    press(KeyCode.RIGHT)
+    press(KeyCode.HOME)
+    press(KeyCode.END)
+    press(KeyCode.PAGE_UP)
+    press(KeyCode.PAGE_DOWN)
+    press(KeyCode.INSERT)
+    press(KeyCode.DELETE)
+    assertEquals(
+      Vector(
+        KeyInput(TerminalKey.Up, KeyModifiers.none),
+        KeyInput(TerminalKey.Down, KeyModifiers.none),
+        KeyInput(TerminalKey.Left, KeyModifiers.none),
+        KeyInput(TerminalKey.Right, KeyModifiers.none),
+        KeyInput(TerminalKey.Home, KeyModifiers.none),
+        KeyInput(TerminalKey.End, KeyModifiers.none),
+        KeyInput(TerminalKey.PageUp, KeyModifiers.none),
+        KeyInput(TerminalKey.PageDown, KeyModifiers.none),
+        KeyInput(TerminalKey.Insert, KeyModifiers.none),
+        KeyInput(TerminalKey.Delete, KeyModifiers.none)
+      ),
+      calls.keyEvents
+    )
+    assertEquals(Vector.empty, calls.sent, "a navigation key is not text")
+
+  @Test
+  def `function keys go through the key route`(): Unit =
+    clear()
+    val keys = Vector(
+      KeyCode.F1 -> TerminalKey.F1,
+      KeyCode.F2 -> TerminalKey.F2,
+      KeyCode.F3 -> TerminalKey.F3,
+      KeyCode.F4 -> TerminalKey.F4,
+      KeyCode.F5 -> TerminalKey.F5,
+      KeyCode.F6 -> TerminalKey.F6,
+      KeyCode.F7 -> TerminalKey.F7,
+      KeyCode.F8 -> TerminalKey.F8,
+      KeyCode.F9 -> TerminalKey.F9,
+      KeyCode.F10 -> TerminalKey.F10,
+      KeyCode.F11 -> TerminalKey.F11,
+      KeyCode.F12 -> TerminalKey.F12
+    )
+    keys.foreach { case (code, _) => press(code) }
+    assertEquals(keys.map { case (_, key) => KeyInput(key, KeyModifiers.none) }, calls.keyEvents)
+    assertEquals(Vector.empty, calls.sent)
+
+  @Test
+  def `shift-tab is a key and plain tab stays text`(): Unit =
+    clear()
+    press(KeyCode.TAB, shift = true)
+    press(KeyCode.TAB)
+    assertEquals(Vector(KeyInput(TerminalKey.Tab, KeyModifiers.none.copy(shift = true))), calls.keyEvents)
+    assertEquals(Vector("\t"), calls.sent)
+
+  @Test
+  def `modified arrows carry their modifiers`(): Unit =
+    clear()
+    press(KeyCode.LEFT, control = true)
+    press(KeyCode.RIGHT, shift = true)
+    press(KeyCode.UP, control = true, shift = true)
+    press(KeyCode.DOWN, alt = true)
+    assertEquals(
+      Vector(
+        KeyInput(TerminalKey.Left, KeyModifiers.none.copy(control = true)),
+        KeyInput(TerminalKey.Right, KeyModifiers.none.copy(shift = true)),
+        KeyInput(TerminalKey.Up, KeyModifiers.none.copy(control = true, shift = true)),
+        KeyInput(TerminalKey.Down, KeyModifiers.none.copy(alt = true))
+      ),
+      calls.keyEvents
+    )
+
+  @Test
+  def `option composition stays text in compose mode`(): Unit =
+    clear()
+    press(KeyCode.V, alt = true)
+    typed("√", alt = true)
+    assertEquals(Vector.empty, calls.keyEvents, "Alt+printable is not a key in Compose mode")
+    assertEquals(Vector("√"), calls.sent)
+
+  @Test
+  def `alt printable is a meta key in escape mode`(): Unit =
+    withAltMode(AltMode.Escape) { terminal =>
+      clear()
+      pressOn(terminal, KeyCode.A, alt = true)
+      typedOn(terminal, "å", alt = true)
+      assertEquals(Vector(KeyInput(TerminalKey.Printable("a"), KeyModifiers.none.copy(alt = true))), calls.keyEvents)
+      assertEquals(Vector.empty, calls.sent, "the platform's composed companion is swallowed")
+    }
+
+  @Test
+  def `alt printable is a meta key in meta mode`(): Unit =
+    withAltMode(AltMode.Meta) { terminal =>
+      clear()
+      pressOn(terminal, KeyCode.B, alt = true)
+      typedOn(terminal, "∫", alt = true)
+      assertEquals(Vector(KeyInput(TerminalKey.Printable("b"), KeyModifiers.none.copy(alt = true))), calls.keyEvents)
+      assertEquals(Vector.empty, calls.sent)
+    }
+
+  @Test
+  def `alt shift digit uses its shifted symbol`(): Unit =
+    withAltMode(AltMode.Escape) { terminal =>
+      clear()
+      pressOn(terminal, KeyCode.DIGIT1, alt = true, shift = true)
+      assertEquals(
+        Vector(KeyInput(TerminalKey.Printable("!"), KeyModifiers.none.copy(shift = true, alt = true))),
+        calls.keyEvents
+      )
+    }
+
+  @Test
+  def `an alt typed companion falls back to a printable key`(): Unit =
+    withAltMode(AltMode.Escape) { terminal =>
+      clear()
+      typedOn(terminal, "é", alt = true)
+      assertEquals(Vector(KeyInput(TerminalKey.Printable("é"), KeyModifiers.none.copy(alt = true))), calls.keyEvents)
+      assertEquals(Vector.empty, calls.sent)
+    }
+
+  @Test
+  def `ctrl-alt and meta-alt typed companions do not leak a meta key`(): Unit =
+    withAltMode(AltMode.Escape) { terminal =>
+      clear()
+      typedOn(terminal, "a", alt = true, control = true)
+      typedOn(terminal, "a", alt = true, meta = true)
+      assertEquals(Vector.empty, calls.keyEvents)
+      assertEquals(Vector.empty, calls.sent)
+    }
+
+  @Test
+  def `alt modified arrows are still keys in compose mode`(): Unit =
+    clear()
+    press(KeyCode.LEFT, alt = true)
+    assertEquals(Vector(KeyInput(TerminalKey.Left, KeyModifiers.none.copy(alt = true))), calls.keyEvents)
+
+  @Test
+  def `plain printable text still takes the text route`(): Unit =
+    clear()
+    typed("a")
+    typed("Z", shift = true)
+    assertEquals(Vector("a", "Z"), calls.sent)
+    assertEquals(Vector.empty, calls.keyEvents)
 
   @Test
   def `control-C interrupts and does not copy`(): Unit =
@@ -236,11 +389,18 @@ final class KeyTest:
       shift: Boolean = false,
       alt: Boolean = false
   ): Unit =
+    pressOn(view.get().getOrElse(fail("no terminal")), code, control = control, meta = meta, shift = shift, alt = alt)
+
+  private def pressOn(
+      target: TerminalView,
+      code: KeyCode,
+      control: Boolean = false,
+      meta: Boolean = false,
+      shift: Boolean = false,
+      alt: Boolean
+  ): Unit =
     val _ = onFx {
-      Event.fireEvent(
-        view.get().getOrElse(fail("no terminal")),
-        new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, shift, control, alt, meta)
-      )
+      Event.fireEvent(target, new KeyEvent(KeyEvent.KEY_PRESSED, "", "", code, shift, control, alt, meta))
     }
 
   private def typed(
@@ -250,12 +410,28 @@ final class KeyTest:
       shift: Boolean = false,
       alt: Boolean = false
   ): Unit =
-    onFx {
-      val _ = Event.fireEvent(
-        view.get().getOrElse(fail("no terminal")),
-        new KeyEvent(KeyEvent.KEY_TYPED, character, "", KeyCode.UNDEFINED, shift, control, alt, meta)
-      )
+    typedOn(view.get().getOrElse(fail("no terminal")), character, control = control, meta = meta, shift = shift, alt = alt)
+
+  private def typedOn(
+      target: TerminalView,
+      character: String,
+      control: Boolean = false,
+      meta: Boolean = false,
+      shift: Boolean = false,
+      alt: Boolean
+  ): Unit =
+    val _ = onFx {
+      Event.fireEvent(target, new KeyEvent(KeyEvent.KEY_TYPED, character, "", KeyCode.UNDEFINED, shift, control, alt, meta))
     }
+
+  private def withAltMode(mode: AltMode)(body: TerminalView => Unit): Unit =
+    val terminal = onFx {
+      val created = TerminalView(calls, SessionId("alt-mode-test"), TerminalMetrics.monospaced(13), mode)
+      created.attached(snapshot("hello world"))
+      created
+    }
+    try body(terminal)
+    finally onFx(terminal.dispose())
 
   private def snapshot(
       text: String,

@@ -2,7 +2,7 @@ package corvi.host
 
 import com.pty4j.{PtyProcess, PtyProcessBuilder}
 import com.techsenger.jeditermfx.core.emulator.JediEmulator
-import com.techsenger.jeditermfx.core.model.{JediTerminal, StyleState, TerminalTextBuffer}
+import com.techsenger.jeditermfx.core.model.{StyleState, TerminalTextBuffer}
 import com.techsenger.jeditermfx.core.util.TermSize as CoreTermSize
 import com.techsenger.jeditermfx.core.{RequestOrigin, TerminalColor, TerminalOutputStream, TextStyle, TtyBasedArrayDataStream}
 import corvi.contract.*
@@ -34,7 +34,7 @@ private[corvi] final class HostSession private[host] (
     private val process: PtyProcess,
     private val connector: PtyProcessTtyConnector,
     private val buffer: TerminalTextBuffer,
-    private val terminal: JediTerminal,
+    private val terminal: KeySynchronizedTerminal,
     private val display: RecordingDisplay
 ):
   /** The terminal's answers to device queries go back to the shell, as they would on a real screen. */
@@ -98,8 +98,14 @@ private[corvi] final class HostSession private[host] (
     terminal.resize(target, RequestOrigin.User)
     connector.resize(target)
 
-  /** Types at the shell, for the headless checks. The UI's key encoding lives here too, later. */
+  /** Types at the shell, for the headless checks. */
   def write(text: String): Unit = connector.write(text)
+
+  /** Sends a non-text key in the terminal's current key modes. `KeySynchronizedTerminal.codeForKey` holds the monitor the emulator's mode
+    * setters use, so DECCKM cannot change the encoder map under this read; the write happens after the lock is released.
+    */
+  def key(input: KeyInput): Unit =
+    KeyEncoder.encode(input, terminal.codeForKey).foreach(bytes => connector.write(bytes))
 
   /** Sends a pointer event in the session's current tracking mode. The mode is read from the display at the moment the event arrives, so a
     * program that enables SGR or switches from click to any-motion tracking gets the encoding it asked for.
@@ -167,9 +173,12 @@ private[corvi] object HostSession:
     styleState.setDefaultStyle(new TextStyle(rgb(theme.foreground), rgb(theme.background)))
     val buffer = new TerminalTextBuffer(initialColumns, initialRows, styleState, historyLines, null)
     val display = new RecordingDisplay()
-    val terminal = new JediTerminal(display, buffer, styleState)
+    val terminal = new KeySynchronizedTerminal(display, buffer, styleState)
     val session = new HostSession(id, index, theme, process, connector, buffer, terminal, display)
     terminal.setTerminalOutput(session.output)
+    // KeyEncoder owns Alt/Meta: cursor and function keys need xterm's `CSI 1;N` suffix, while the engine's own Alt mode would send an
+    // escape byte followed by the unmodified key. Turning the engine's prefix off keeps that rule in one place.
+    terminal.setAltSendsEscape(false)
     session
 
   private def rgb(colour: Rgb): TerminalColor = TerminalColor.rgb(colour.red, colour.green, colour.blue)
