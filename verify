@@ -1,0 +1,24 @@
+#!/bin/sh
+# The project's gate: the format check, every JUnit/TestFX suite, and then — unless --quick — the probe mains that need a real PTY, a real
+# daemon or a real scene. RendererSnapshot is deliberately absent: it writes the screenshots, it asserts nothing.
+#
+# If this seems to hang before printing anything, look for a Metals (or other) JVM holding `out/mill-out-lock`: `--no-daemon` waits for that
+# lock silently instead of failing. Close the client that holds it; this script does not retry.
+set -eu
+cd "$(dirname "$0")"
+
+./mill --no-daemon mill.scalalib.scalafmt/checkFormatAll
+./mill --no-daemon __.test
+
+if [ "${1:-}" = "--quick" ]; then
+  echo "verify: format and suites green (--quick: probes skipped)"
+  exit 0
+fi
+
+./mill -i host.test.runMain corvi.host.HostProbe
+./mill -i host.test.runMain corvi.host.ProtocolProbe
+./mill -i host.test.runMain corvi.host.HostDaemonProbe
+./mill -i app.test.runMain corvi.app.UiProbe
+./mill -i app.test.runMain corvi.app.RendererProbe
+
+echo "verify: format, suites and probes green"

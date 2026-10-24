@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a branch makes an older run's answer irrelevant; main's own runs are allowed
+# to finish, so its status never describes a commit someone has replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    # Fast, and separate from the tests on purpose: a flaky UI test must not hide a compile error,
+    # and a rerun of this job costs a few minutes rather than the whole macOS suite. The compile is
+    # platform-independent (the JavaFX jars are on the classpath; no toolkit starts here).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.cache/mill
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('build.mill', '.mill-version') }}
+          restore-keys: ${{ runner.os }}-mill-
+      - run: ./mill --no-daemon __.compile
+      - run: ./mill --no-daemon mill.scalalib.scalafmt/checkFormatAll
+
+  test:
+    # Everything that does not start a window: the pure UI/renderer cores and the host registry
+    # (which needs a real PTY and shell, hence macOS).
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.cache/mill
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('build.mill', '.mill-version') }}
+          restore-keys: ${{ runner.os }}-mill-
+      - run: ./mill --no-daemon ui.test renderer.test host.test
+
+  ui:
+    # The TestFX suite against a real daemon and a real shell, including the window/tab, key and
+    # resize phases. JavaFX needs a window server, which the hosted macOS runner does not have:
+    # the Job would fail/hang. It runs when CORVI_MACOS_UI is true and CORVI_MACOS_RUNNER names a
+    # self-hosted macOS runner with a display; otherwise it is skipped and ./verify covers it locally.
+    if: ${{ vars.CORVI_MACOS_UI == 'true' }}
+    runs-on: ${{ vars.CORVI_MACOS_RUNNER || 'macos-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.cache/mill
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('build.mill', '.mill-version') }}
+          restore-keys: ${{ runner.os }}-mill-
+      - run: ./mill --no-daemon app.test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-test-host-log
+          path: out/corvi-ui-test-host.log
+          if-no-files-found: ignore
+
+  probes:
+    # The image- and PTY-level probes: renderer pixels, UI state, the host's emulator, protocol and
+    # daemon. The UI probes need a display too, so they share the UI runner switch.
+    if: ${{ vars.CORVI_MACOS_UI == 'true' }}
+    runs-on: ${{ vars.CORVI_MACOS_RUNNER || 'macos-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.cache/mill
+            ~/.mill
+          key: ${{ runner.os }}-mill-${{ hashFiles('build.mill', '.mill-version') }}
+          restore-keys: ${{ runner.os }}-mill-
+      - run: ./mill --no-daemon app.test.runMain corvi.app.UiProbe
+      - run: ./mill --no-daemon app.test.runMain corvi.app.RendererProbe
+      - run: ./mill --no-daemon host.test.runMain corvi.host.HostProbe
+      - run: ./mill --no-daemon host.test.runMain corvi.host.ProtocolProbe
+      - run: ./mill --no-daemon host.test.runMain corvi.host.HostDaemonProbe
