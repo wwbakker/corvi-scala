@@ -87,6 +87,9 @@ failure.
 ./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
 
+`./scripts/pi-paging-profile.sh` reproduces and profiles the Pi paging report against a copy of the newest Pi session; see
+`docs/paging-profile.md`.
+
 `app.test` passes a socket of its own through `forkEnv` (a short `/tmp` path: a Unix socket path is limited to ~104
 bytes) and kills the daemon it started, so it never touches the user's host. It drives the window with the same JavaFX
 press/release/click events a person sends — the sequence that caught the tab bug — rather than TestFX's glass robot,

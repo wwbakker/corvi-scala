@@ -255,13 +255,17 @@ object app extends ScalaModule:
         mvn"org.testfx:testfx-junit5:4.0.18"
       )
     }
-    def forkArgs = fxTestForkArgs
+    def forkArgs = fxTestForkArgs ++ Option.when(sys.env.get("CORVI_PAGING_HW").contains("1")) {
+      // The paging profile must measure the production hardware path; ordinary test runs keep software rendering.
+      "-Dprism.order=es2,sw"
+    }
     /** A socket of this run's own. It lives in `/tmp` because a Unix domain socket path is limited to ~104 bytes on macOS, and the
-      * build's own test directory is longer than that; the name is derived from the task so two checkouts do not share a socket.
+      * build's own test directory is longer than that; the name is derived from the task so two checkouts do not share a socket. The paging
+      * profile supplies its own private socket through `CORVI_PAGING_HOST_SOCKET`.
       */
     def forkEnv = Task {
       val root = os.Path("/tmp") / s"corvi-ui-test-${java.lang.Integer.toHexString(Task.dest.toString.hashCode)}"
-      Map("CORVI_HOST_SOCKET" -> (root / "host.sock").toString)
+      Map("CORVI_HOST_SOCKET" -> sys.env.getOrElse("CORVI_PAGING_HOST_SOCKET", (root / "host.sock").toString))
     }
 
 /** The Corvi shell: sidebar, tab strip, Overview and the terminal area, over plain interfaces from `contract`. It depends on nothing of ours
