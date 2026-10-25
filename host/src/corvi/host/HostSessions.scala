@@ -242,7 +242,7 @@ private[corvi] final class HostSessions private (
       for
         step <- Sync.defer(managed.session.frameSince(baseline))
         (frame, damage) = step
-        _ <- if damage.isEmpty then Sync.defer(()) else push(client, Methods.Damage, DamageParams(frame.id, damage))
+        _ <- if damage.isEmpty then Sync.defer(()) else push(client, Methods.Damage, DamageParams(frame.id, DamageCodec.encode(damage)))
         // The baseline moves with the delta, whether or not the send was delivered: `send` logs a failure and carries on, because a failed
         // push means the peer's connection is gone and its unbind removes the entry. `updatedWith` on the entry and on the session keeps a client, or a session, that was unbound or closed
         // while this tick was in flight out of the registry: `updated` would put it back and sample it forever.

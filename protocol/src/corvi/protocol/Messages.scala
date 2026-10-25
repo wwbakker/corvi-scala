@@ -31,8 +31,10 @@ object Messages:
   /** `session.resize`: the grid the client wants. */
   final case class ResizeParams(id: SessionId, size: TermSize) derives Schema, CanEqual
 
-  /** `session.damage`: a frame delta, which carries the session because a `Damage` is about a screen and not a session. */
-  final case class DamageParams(id: SessionId, damage: Damage) derives Schema, CanEqual
+  /** `session.damage`: a frame delta, which carries the session because a `Damage` is about a screen and not a session. The grid is a
+    * compact binary payload (`DamageCodec`); the JSON envelope carries only the session id and the encoded bytes.
+    */
+  final case class DamageParams(id: SessionId, payload: String) derives Schema, CanEqual
 
   /** `host.hello`: the token from the daemon's token file. The first thing every connection says. */
   final case class HelloParams(token: String) derives Schema, CanEqual

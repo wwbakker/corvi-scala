@@ -34,6 +34,6 @@ object ClientRoutes:
 
   def routes(sink: FrameSink)(using Frame): Seq[JsonRpcRoute[?, ?, ?]] =
     Seq(
-      JsonRpcRoute.notification[DamageParams](Methods.Damage)((params, _) => sink.damage(params.id, params.damage)),
+      JsonRpcRoute.notification[DamageParams](Methods.Damage)((params, _) => sink.damage(params.id, DamageCodec.decode(params.payload))),
       JsonRpcRoute.notification[EndedParams](Methods.Ended)((params, _) => sink.ended(params.id, params.ended))
     )
