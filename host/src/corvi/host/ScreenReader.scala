@@ -57,6 +57,66 @@ private[host] object ScreenReader:
       )
     finally buffer.unlock()
 
+  /** A snapshot and delta without rebuilding every row's cells. Rows whose text and resolved style digest matches the previous frame reuse
+    * the previous `Row`; only changed rows are materialised. The digest is an exact text string plus a style hash, so a full Pi page still
+    * sends every changed row, while an idle or cursor-only frame costs one line read per row instead of 15k cells.
+    */
+  def changes(
+      previous: Snapshot,
+      buffer: TerminalTextBuffer,
+      display: RecordingDisplay,
+      theme: TerminalTheme,
+      linkUri: TextStyle => Option[String]
+  ): (Snapshot, Damage) =
+    buffer.lock()
+    try
+      val state: State = display.state
+      val size = TermSize(buffer.getWidth, buffer.getHeight)
+      val resized = previous.size != size
+      val changed = Vector.newBuilder[RowDamage]
+      val rows =
+        if resized then
+          Vector.tabulate(size.rows) { y =>
+            val currentRow = row(buffer, y, linkUri)
+            changed += RowDamage(y, currentRow)
+            currentRow
+          }
+        else
+          previous.rows.zipWithIndex.map { (old, y) =>
+            val line = buffer.getLine(y)
+            if digestOfRow(old) == digestOfLine(line, buffer.getWidth, linkUri) then old
+            else
+              val currentRow = row(buffer, y, linkUri)
+              changed += RowDamage(y, currentRow)
+              currentRow
+          }
+      val cursor = Cursor(
+        x = state.cursorX,
+        y = math.max(0, state.cursorY - 1),
+        shape = state.cursorShape,
+        blinking = state.cursorBlinking,
+        visible = state.cursorVisible
+      )
+      val modes = Modes(
+        alternateScreen = state.alternateScreen,
+        mouseMode = state.mouseMode,
+        mouseFormat = state.mouseFormat,
+        bracketedPaste = state.bracketedPaste,
+        title = state.title,
+        focusReporting = state.focusReporting
+      )
+      val historyRows = buffer.getHistoryLinesCount
+      val current = Snapshot(previous.id, size, rows, cursor, modes, historyRows, theme)
+      val damage = Damage(
+        rows = changed.result(),
+        size = Option.when(resized)(size),
+        cursor = Option.when(previous.cursor != cursor)(cursor),
+        modes = Option.when(previous.modes != modes)(modes),
+        historyRows = Option.when(previous.historyRows != historyRows)(historyRows)
+      )
+      (current, damage)
+    finally buffer.unlock()
+
   /** The session's metrics, read under the buffer's lock like everything else that reads the buffer. */
   def info(
       id: SessionId,
@@ -146,6 +206,64 @@ private[host] object ScreenReader:
       inverse = style.hasOption(TextStyle.Option.INVERSE),
       link = linkUri(style)
     )
+
+  private final case class RowDigest(text: String, style: Long) derives CanEqual
+
+  private def digestOfRow(row: Row): RowDigest =
+    val text = new java.lang.StringBuilder()
+    var style = 0xcbf29ce484222325L
+    row.cells.foreach { cell =>
+      text.append(cell.text)
+      style = mix(style, cell.width.ordinal.toLong)
+      style = mix(style, cell.foreground.map(colour => (colour.red << 16) | (colour.green << 8) | colour.blue).getOrElse(-1).toLong)
+      style = mix(style, cell.background.map(colour => (colour.red << 16) | (colour.green << 8) | colour.blue).getOrElse(-1).toLong)
+      style = mix(style, if cell.bold then 1L else 0L)
+      style = mix(style, if cell.italic then 2L else 0L)
+      style = mix(style, if cell.underline then 4L else 0L)
+      style = mix(style, if cell.inverse then 8L else 0L)
+      style = mix(style, cell.link.hashCode.toLong)
+    }
+    RowDigest(text.toString, style)
+
+  private def digestOfLine(line: TerminalLine, width: Int, linkUri: TextStyle => Option[String]): RowDigest =
+    val chars = line.getText
+    val text = new java.lang.StringBuilder()
+    var style = 0xcbf29ce484222325L
+    for x <- 0 until width do
+      val raw = if x < chars.length then chars.charAt(x) else ' '
+      val next = if x + 1 < chars.length then chars.charAt(x + 1) else ' '
+      val (cellText, cellWidth) =
+        if raw == CharUtils.DWC || Character.isLowSurrogate(raw) then ("", CellWidth.Continuation)
+        else if Character.isHighSurrogate(raw) && Character.isLowSurrogate(next) then (String(Array(raw, next)), CellWidth.Wide)
+        else if next == CharUtils.DWC then (raw.toString, CellWidth.Wide)
+        else (raw.toString, CellWidth.Narrow)
+      text.append(cellText)
+      style = mix(style, cellWidth.ordinal.toLong)
+      val current = Option(line.getStyleAt(x)).getOrElse(TextStyle.EMPTY)
+      style = mix(
+        style,
+        Option(current.getForeground)
+          .map(colour => rgb(colour))
+          .map(colour => (colour.red << 16) | (colour.green << 8) | colour.blue)
+          .getOrElse(-1)
+          .toLong
+      )
+      style = mix(
+        style,
+        Option(current.getBackground)
+          .map(colour => rgb(colour))
+          .map(colour => (colour.red << 16) | (colour.green << 8) | colour.blue)
+          .getOrElse(-1)
+          .toLong
+      )
+      style = mix(style, if current.hasOption(TextStyle.Option.BOLD) then 1L else 0L)
+      style = mix(style, if current.hasOption(TextStyle.Option.ITALIC) then 2L else 0L)
+      style = mix(style, if current.hasOption(TextStyle.Option.UNDERLINED) then 4L else 0L)
+      style = mix(style, if current.hasOption(TextStyle.Option.INVERSE) then 8L else 0L)
+      style = mix(style, linkUri(current).hashCode.toLong)
+    RowDigest(text.toString, style)
+
+  private def mix(hash: Long, value: Long): Long = (hash ^ value) * 1099511628211L
 
   /** An indexed colour is resolved through the palette; an RGB one comes back unchanged. */
   private def rgb(color: TerminalColor): Rgb =

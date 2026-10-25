@@ -93,8 +93,7 @@ private[corvi] final class HostSession private[host] (
     * diffing against it separately would compare a frame with itself when output arrives in between.
     */
   def frameSince(before: Snapshot): (Snapshot, Damage) =
-    val current = snapshot()
-    (current, ScreenReader.damage(before, current))
+    ScreenReader.changes(before, buffer, display, theme, terminal.uriFor)
 
   /** The rows that changed since `before`, plus whatever else in the frame did: what a frontend that drew that snapshot has to repaint. */
   def damageSince(before: Snapshot): Damage = frameSince(before)._2
