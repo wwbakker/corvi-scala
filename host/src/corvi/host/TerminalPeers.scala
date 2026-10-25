@@ -41,18 +41,18 @@ object TerminalPeers:
         clientHandler <- JsonRpcHandler.init(clientSide, ClientRoutes.routes(sink)*)
       yield Wired(TerminalClient(clientHandler), id)
 
-  /** A host inside the caller's scope: its sessions end with the scope, and its shell and push interval are what the caller asked for. */
-  def host(pushInterval: kyo.Duration, command: Seq[String])(using Frame): InMemoryHost < (Async & Scope) =
+  /** A host inside the caller's scope: its sessions end with the scope, and its shell is what the caller asked for. */
+  def host(command: Seq[String])(using Frame): InMemoryHost < (Async & Scope) =
     for
-      sessions <- HostSessions.init(pushInterval, command)
+      sessions <- HostSessions.init(command)
       _ <- Scope.ensure(sessions.shutdown)
     yield new InMemoryHost(sessions)
 
   /** A host with one client on it, which is what the probes and the renderer start from. */
-  def inMemory(sink: FrameSink, pushInterval: kyo.Duration, command: Seq[String])(using
+  def inMemory(sink: FrameSink, command: Seq[String])(using
       Frame
   ): (TerminalService, InMemoryHost) < (Async & Scope & Abort[ClientAlreadyBound]) =
     for
-      host <- TerminalPeers.host(pushInterval, command)
+      host <- TerminalPeers.host(command)
       wired <- host.client(sink)
     yield (wired.client, host)

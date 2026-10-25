@@ -16,7 +16,6 @@ import javafx.scene.image.WritableImage
 import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, ScrollEvent}
 import javafx.stage.Stage
 import javax.imageio.ImageIO
-import kyo.Duration
 import scala.concurrent.duration.*
 
 /** The renderer's regression suite: a real host session painted by the real canvas, checked through the frame it was given and the pixels
@@ -31,7 +30,6 @@ object RendererProbe:
   private val cols = 100
   private val rows = 28
   private val fontSize = 13.0
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
   private val waitTimeout: scala.concurrent.duration.Duration = 20.seconds
 
   def main(args: Array[String]): Unit =
@@ -51,7 +49,7 @@ object RendererProbe:
 
   private def run(): Int =
     val reporter = Reporter()
-    val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
+    val running = Harness.start(cols, rows, HostSession.loginShell)
     var stage: Option[Stage] = None
     try
       val metrics = onFx(TerminalMetrics.monospaced(fontSize))

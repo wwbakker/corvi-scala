@@ -14,9 +14,6 @@ import scala.concurrent.duration.*
   * ./mill -i host.test.runMain corvi.host.ProtocolProbe
   */
 object ProtocolProbe:
-  /** A push tick every 200 ms: slow enough that a delta covers several updates, fast enough not to slow the checks down. */
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(200.millis)
-
   private val waitTimeout: scala.concurrent.duration.Duration = 20.seconds
 
   def main(args: Array[String]): Unit =
@@ -37,7 +34,7 @@ object ProtocolProbe:
     val reporter = Reporter()
     for
       cache <- FrameCache.init
-      peers <- TerminalPeers.inMemory(cache, pushInterval, HostSession.loginShell)
+      peers <- TerminalPeers.inMemory(cache, HostSession.loginShell)
       (client, host) = peers
       main <- screenChecks(client, cache, reporter)
       listed <- client.list
@@ -438,7 +435,7 @@ object ProtocolProbe:
     val report = reporter.report
     for
       cache <- FrameCache.init
-      peers <- TerminalPeers.inMemory(cache, pushInterval, Seq("/nonexistent/corvi-shell"))
+      peers <- TerminalPeers.inMemory(cache, Seq("/nonexistent/corvi-shell"))
       (client, _) = peers
       attempt <- Abort.run[TerminalError | Closed](client.create(cwd, TermSize(80, 24)))
       _ = report(

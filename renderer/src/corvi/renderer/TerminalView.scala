@@ -19,6 +19,7 @@ import javafx.scene.input.{
 import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
 import javafx.scene.paint.Color
 import javafx.util.Duration
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import kyo.*
 import kyo.Frame
 import scala.jdk.CollectionConverters.*
@@ -82,6 +83,12 @@ final class TerminalView(
     * computed against the snapshot, so it is exactly what this view needs once seeded rather than something to drop.
     */
   private var pendingDamage: Vector[Damage] = Vector.empty
+
+  /** Latest damage waiting for the FX thread, coalesced: a client that falls behind applies the newest screen instead of queueing one
+    * `Platform.runLater` per frame. The boolean is the single scheduled drain.
+    */
+  private val batchedDamage: AtomicReference[Option[Damage]] = new AtomicReference(None)
+  private val batchScheduled: AtomicBoolean = new AtomicBoolean(false)
 
   /** The grid the last resize asked for, until the host's frame confirms it: the answer is a round trip away and the view must not ask
     * twice.
@@ -569,6 +576,7 @@ final class TerminalView(
     clearFind()
     resizeTimer.stop()
     setPreedit(None)
+    batchedDamage.set(None)
     canvas.dispose()
 
   /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
@@ -605,7 +613,21 @@ final class TerminalView(
     */
   def pushDamage(id: SessionId, damage: Damage): Unit =
     if id == session then
-      val _ = Platform.runLater(() => applyDamage(damage))
+      if Platform.isFxApplicationThread then applyDamage(damage)
+      else
+        val _ = batchedDamage.updateAndGet(current => Some(current.fold(damage)(_.merge(damage))))
+        if batchScheduled.compareAndSet(false, true) then
+          val _ = Platform.runLater(() => drainBatchedDamage())
+
+  /** Runs on the FX thread: applies the latest coalesced damage once. A frame that arrives while this one is being applied schedules the
+    * next drain, so a burst becomes at most one paint per FX turn instead of one per host frame.
+    */
+  private def drainBatchedDamage(): Unit =
+    val next = batchedDamage.getAndSet(None)
+    batchScheduled.set(false)
+    next.foreach(applyDamage)
+    if batchedDamage.get().exists(damage => !damage.isEmpty) && batchScheduled.compareAndSet(false, true) then
+      val _ = Platform.runLater(() => drainBatchedDamage())
 
   def pushEnded(id: SessionId, ended: Ended): Unit =
     if id == session then

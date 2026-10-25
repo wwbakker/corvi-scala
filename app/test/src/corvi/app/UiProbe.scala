@@ -30,7 +30,6 @@ import scala.concurrent.duration.*
   */
 object UiProbe:
   private val waitTimeout: scala.concurrent.duration.Duration = 30.seconds
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
 
   def main(args: Array[String]): Unit =
     val finished = CountDownLatch(1)
@@ -49,7 +48,7 @@ object UiProbe:
 
   private def run(): Int =
     val reporter = Reporter()
-    val running = Harness.start(100, 28, pushInterval, HostSession.loginShell)
+    val running = Harness.start(100, 28, HostSession.loginShell)
     var stage: Option[Stage] = None
     try
       val sessions = listSessions(running).getOrElse(fail("the harness host answered no list"))

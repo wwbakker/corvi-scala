@@ -26,7 +26,7 @@ object Harness:
   /** Starts the host, waits for the client and one shell, and returns them. The shell lives until `stop()` is called; callers that exit the
     * process should call it first, so a harness cannot leave a shell behind.
     */
-  def start(cols: Int, rows: Int, pushInterval: kyo.Duration, command: Seq[String]): Running =
+  def start(cols: Int, rows: Int, command: Seq[String]): Running =
     val sink = new ViewSink()
     val ready = CountDownLatch(1)
     val stopping = CountDownLatch(1)
@@ -38,7 +38,7 @@ object Harness:
       KyoApp.Unsafe.runAndBlock(kyo.Duration.Infinity) {
         Scope.run {
           for
-            host <- TerminalPeers.host(pushInterval, command)
+            host <- TerminalPeers.host(command)
             wired <- host.client(sink)
             client = Client(wired.client, sink)
             _ <- Fiber.init(client.serve)

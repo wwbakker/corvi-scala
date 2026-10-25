@@ -9,6 +9,7 @@ import corvi.contract.*
 import java.io.InterruptedIOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import kyo.*
 // The contract has a `Frame` as well (a client's screen); this file means kyo's source position, so it says so.
@@ -56,6 +57,20 @@ private[corvi] final class HostSession private[host] (
     */
   private val screenGeneration: AtomicLong = new AtomicLong(0)
 
+  /** Wakes the push loop when the screen may have changed. Capacity one: every wake while one is pending is the same wake, and the push
+    * loop samples the latest frame when it gets to it.
+    */
+  private val screenChanges: LinkedBlockingQueue[Unit] = new LinkedBlockingQueue[Unit](1)
+
+  /** Blocks until the emulator applies output or the grid is resized. The push loop is the only reader, so a wake cannot be lost. Returns
+    * false when the wait was interrupted, which is how a closing host stops its push loop without spinning on an interrupted thread.
+    */
+  private[host] def awaitScreenChange(): Boolean =
+    try
+      screenChanges.take()
+      true
+    catch case _: InterruptedException => false
+
   /** The shell's process id, which is what a reattaching client compares to be sure it found the same shell. */
   def shellPid: Long = process.pid()
 
@@ -80,8 +95,15 @@ private[corvi] final class HostSession private[host] (
   /** The rows that changed since `before`, plus whatever else in the frame did: what a frontend that drew that snapshot has to repaint. */
   def damageSince(before: Snapshot): Damage = frameSince(before)._2
 
-  /** The value the push loop compares to decide whether the screen can have changed. */
+  /** How many screen changes this session has applied; for the probes. */
   private[host] def generation: Long = screenGeneration.get
+
+  /** Records a screen change and wakes the push loop. The token is what makes a change arriving between a sample and the next wait
+    * impossible to miss; the generation is kept for the probes and as a cheap description of how much output was applied.
+    */
+  private def markScreenChanged(): Unit =
+    val _ = screenGeneration.incrementAndGet()
+    val _ = screenChanges.offer(())
 
   /** The failure that ended the reader, if it was not a clean end. */
   def error: Option[Throwable] = failure.get
@@ -92,6 +114,7 @@ private[corvi] final class HostSession private[host] (
   def close(): Unit =
     connector.close()
     process.destroy()
+    markScreenChanged()
 
   /** Asks for a new size: the grid first, then the PTY.
     *
@@ -105,7 +128,7 @@ private[corvi] final class HostSession private[host] (
     val target = CoreTermSize(size.cols, size.rows)
     terminal.resize(target, RequestOrigin.User)
     connector.resize(target)
-    val _ = screenGeneration.incrementAndGet()
+    markScreenChanged()
 
   /** Types at the shell, for the headless checks. */
   def write(text: String): Unit = connector.write(text)
@@ -152,7 +175,7 @@ private[corvi] final class HostSession private[host] (
     try
       while emulator.hasNext do
         emulator.next()
-        val _ = screenGeneration.incrementAndGet()
+        markScreenChanged()
     catch
       // The read was interrupted: that is how a session ends, not a failure.
       case _: InterruptedIOException => ()
@@ -162,7 +185,9 @@ private[corvi] final class HostSession private[host] (
           val _ = failure.set(Some(error))
           logger.error(s"session ${id.value} stopped reading", error)
     finally
-      // A dead shell must not leave a cursor blinking on a screen nobody will update again.
+      // A dead shell must not leave a cursor blinking on a screen nobody will update again. Wake the push loop so it can report the end
+      // even when the last output was already sampled.
+      markScreenChanged()
       terminal.disconnected()
 
 private[corvi] object HostSession:
@@ -198,6 +223,9 @@ private[corvi] object HostSession:
     val display = new RecordingDisplay()
     val terminal = new KeySynchronizedTerminal(display, buffer, styleState)
     val session = new HostSession(id, index, theme, process, connector, buffer, terminal, display)
+    // The shell can outlive the last output by a scheduling tick: wake the push loop when the process actually exits, so the end is
+    // reported even when there is no PTY byte or resize to wake it.
+    val _ = process.onExit().thenRun(() => session.markScreenChanged())
     terminal.setTerminalOutput(session.output)
     // KeyEncoder owns Alt/Meta: cursor and function keys need xterm's `CSI 1;N` suffix, while the engine's own Alt mode would send an
     // escape byte followed by the unmodified key. Turning the engine's prefix off keeps that rule in one place.

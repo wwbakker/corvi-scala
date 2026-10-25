@@ -9,8 +9,6 @@ import javafx.scene.Scene
 import javafx.scene.image.WritableImage
 import javafx.stage.Stage
 import javax.imageio.ImageIO
-import kyo.Duration
-import scala.concurrent.duration.*
 
 /** Renders the real terminal view into `out/corvi-renderer.png` and exits.
   *
@@ -23,7 +21,6 @@ import scala.concurrent.duration.*
 object RendererSnapshot extends scalafx.application.JFXApp3:
   private val cols = 100
   private val rows = 28
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
 
   /** About five seconds of pulses, then whatever is on screen; the blank check behind it decides whether the PNG is worth writing. */
   private val timeoutFrames: Int = 300
@@ -31,7 +28,7 @@ object RendererSnapshot extends scalafx.application.JFXApp3:
 
   override def start(): Unit =
     val metrics = TerminalMetrics.monospaced(13)
-    val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
+    val running = Harness.start(cols, rows, HostSession.loginShell)
     val view = TerminalView(running.client, running.session, metrics)
     running.client.sink.plug(view)
     view.attach()

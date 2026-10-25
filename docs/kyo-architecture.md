@@ -105,15 +105,11 @@ The **host interprets the terminal**; the frontend only renders it.
   self-healing; it is not needed while attach only happens at start and on reconnect, which is a new
   client.) Client ids are unique per connection (`client-1`, `client-2`, …) and a duplicate `bind` is
   refused rather than replacing the other peer.
-- **Pushes**: one loop per session samples every `pushInterval` (an `init` parameter; the probes run
-  at 200 ms, the host at 16 ms) and sends a delta only when one is non-empty, and only to clients
-  that attached — a session nobody is watching is not even sampled. The host session keeps a
-  generation counter that advances when the emulator applies output or the grid is resized, so a
-  watched but idle session costs one atomic read per tick instead of a full-screen snapshot and
-  diff. Sampling *is* the coalescer: everything since the previous tick leaves as one delta, and an
-  unchanged frame costs nothing on the wire. Waking the loop from the reader (a `Channel`/`Signal`
-  per session, once the host is a `KyoApp`) is a later refinement; the current loops use
-  `Fiber.initUnscoped` because a route handler has no scope.
+- **Pushes**: one loop per session waits on that session's wake-up queue and sends a delta only to
+  clients that attached. The emulator, a resize and the process's exit wake the queue; capacity one
+  coalesces a burst into the latest frame, and an idle session blocks instead of waking every tick.
+  The loop still uses `Fiber.initUnscoped` because a route handler has no scope. The host session
+  also keeps a generation counter for the probes, which proves that an idle screen applies no output.
 - **Client** (`TerminalService`): UI-free, no `kyo-jsonrpc` in its signatures, with a `FrameSink` for
   the two pushes. `TerminalPeers.inMemory` wires a host peer and a client peer over
   `JsonRpcTransport.inMemory`; the Unix-socket phase replaces only the transport.
@@ -210,6 +206,8 @@ they start a real host.
 - **The FX/Kyo boundary.** The client's Kyo runtime gets a thread of its own; the FX thread never enters an effect. FX hands commands (text,
   resize, history) to a blocking queue that one fiber drains, and every result and every push comes back through `Platform.runLater`. That is
   two hops in the whole renderer, and it is why `SessionEvents` can promise the FX thread and `FrameSink` is the only place that hops.
+  Incoming damage is coalesced before that hop: the latest delta waits behind one scheduled `Platform.runLater`, so a slow paint cannot build
+  an unbounded queue of intermediate screens.
 - **Input.** Typed characters go out as `session.text`, and the editing keys — Backspace as `^?`, Enter as `\r`, Tab, Escape — are forwarded
   from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. Arrows, navigation,
   F1–F12, Shift+Tab and modified keys go through `session.key` as a `TerminalKey`; the host's `KeyEncoder` turns them into the session's

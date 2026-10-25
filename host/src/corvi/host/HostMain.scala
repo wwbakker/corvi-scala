@@ -22,9 +22,6 @@ import scala.concurrent.duration.*
   */
 object HostMain extends KyoApp:
 
-  /** A push tick every 16 ms: 60 frames a second, which is what a screen can show. */
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
-
   run {
     for
       // The daemon's scope is run here so the process can exit *after* it has closed: `KyoApp` treats a successful body as "nothing to
@@ -50,7 +47,7 @@ object HostMain extends KyoApp:
         val _ = Files.deleteIfExists(paths.socket)
         val _ = Files.deleteIfExists(paths.ownerFile)
       })
-      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(pushInterval, HostSession.loginShell)))(_.shutdown)
+      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(HostSession.loginShell)))(_.shutdown)
       stop <- Latch.init(1)
       startedAt <- Sync.defer(java.lang.System.currentTimeMillis())
       _ <- Fiber.init(acceptLoop(server, host, token, stop, startedAt))

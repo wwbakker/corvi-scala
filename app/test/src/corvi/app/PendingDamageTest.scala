@@ -40,6 +40,24 @@ final class PendingDamageTest:
     assertEquals(0, terminal.pendingDamageCount, "and the buffer is empty once the seed has been applied")
 
   @Test
+  def `merging damage keeps the latest row and frame fields`(): Unit =
+    val cursor = Cursor(1, 2, None, blinking = false, visible = true)
+    val first = Damage(Vector(RowDamage(0, Row(Vector(cell("OLD"))))), None, Some(cursor), None, Some(1))
+    val second = Damage(
+      Vector(RowDamage(0, Row(Vector(cell("NEW")))), RowDamage(1, Row(Vector(cell("ROW"))))),
+      Some(TermSize(cols = 1, rows = 2)),
+      Some(cursor.copy(x = 3)),
+      Some(Modes(false, MouseMode.Off, MouseFormat.X10, bracketedPaste = false, title = "")),
+      Some(2)
+    )
+    val merged = first.merge(second)
+    assertEquals(Vector(RowDamage(0, Row(Vector(cell("NEW")))), RowDamage(1, Row(Vector(cell("ROW"))))), merged.rows, "later rows win")
+    assertEquals(Some(TermSize(cols = 1, rows = 2)), merged.size, "the later size wins")
+    assertEquals(Some(cursor.copy(x = 3)), merged.cursor, "the later cursor wins")
+    assertEquals(Some(2), merged.historyRows, "the later history depth wins")
+    assertEquals(second, first.merge(second), "merging with the newest delta is idempotent")
+
+  @Test
   def `damage for a view that never attaches stays bounded`(): Unit =
     val terminal = view.get().getOrElse(fail("no terminal"))
     (1 to 400).foreach(index => onFx(terminal.pushDamage(terminal.session, damage(row = 0, s"ROW$index"))))

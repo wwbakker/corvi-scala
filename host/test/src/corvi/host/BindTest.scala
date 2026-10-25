@@ -24,7 +24,7 @@ final class BindTest:
   @Test
   def `concurrent binds keep every client, and a duplicate is refused`(): Unit =
     val clients = (1 to count).toVector.map(index => ClientId(s"client-$index"))
-    val host = runKyo { HostSessions.init(kyo.Duration.fromScala(16.millis), HostSession.loginShell) }
+    val host = runKyo { HostSessions.init(HostSession.loginShell) }
     val handlers = runKyo { Async.foreach(clients)(_ => handler).map(_.toVector) }
     val pairs = clients.zip(handlers)
 

@@ -25,7 +25,6 @@ import kyo.Frame
   */
 private[corvi] final class HostSessions private (
     command: Seq[String],
-    pushInterval: kyo.Duration,
     sessions: AtomicRef[Map[SessionId, HostSessions.Managed]],
     connections: AtomicRef[Map[ClientId, HostSessions.Connected]],
     lastIndex: AtomicInt,
@@ -225,20 +224,18 @@ private[corvi] final class HostSessions private (
   private def startPush(managed: Managed)(using Frame): Unit < Sync =
     Fiber.initUnscoped(pushLoop(managed)).map(_ => ())
 
-  /** Pushes what changed to each client attached to this session, until the shell is gone. Sampling is the coalescer: everything that
-    * arrived since the previous tick leaves as one delta per client, an unchanged frame costs nothing on the wire, and a session whose
-    * screen did not change is not even snapshotted. The generation is the host session's own record of applied output and resizes, so an
-    * idle shell costs one atomic read per tick instead of a full-screen diff every 16 ms.
+  /** Pushes what changed to each client attached to this session, until the shell is gone. The session wakes this loop when the emulator
+    * applies output or the grid is resized; a wake that arrives while one is already pending is the same wake, so the loop samples the
+    * latest frame rather than every intermediate one. An idle session blocks instead of waking every 16 ms.
     */
   private def pushLoop(managed: Managed)(using Frame): Unit < Async =
-    def loop(previousGeneration: Long): Unit < Async =
+    def loop: Unit < Async =
       for
-        _ <- Async.sleep(pushInterval)
-        currentGeneration <- Sync.defer(managed.session.generation)
-        _ <- if currentGeneration != previousGeneration then pushDamage(managed) else Sync.defer(())
-        _ <- if managed.session.info.running then loop(currentGeneration) else pushEnded(managed)
+        changed <- Sync.defer(managed.session.awaitScreenChange())
+        _ <- if !changed then Sync.defer(()) else pushDamage(managed)
+        _ <- if !changed then Sync.defer(()) else if managed.session.info.running then loop else pushEnded(managed)
       yield ()
-    loop(-1L)
+    loop
 
   private def pushDamage(managed: Managed)(using Frame): Unit < Async =
     def one(client: ClientId, baseline: Snapshot): Unit < Async =
@@ -314,13 +311,11 @@ private[corvi] object HostSessions:
   /** A session, the latch that ends the scope holding it, and whether a client ended it. */
   private[corvi] final case class Managed(session: HostSession, stop: Latch, closed: AtomicRef[Boolean])
 
-  /** The shell to run is a parameter so a caller can prove what a shell that cannot start does. `pushInterval` is too, so a test does not
-    * have to wait a frame.
-    */
-  def init(pushInterval: kyo.Duration, command: Seq[String])(using Frame): HostSessions < Sync =
+  /** The shell to run is a parameter so a caller can prove what a shell that cannot start does. */
+  def init(command: Seq[String])(using Frame): HostSessions < Sync =
     for
       sessions <- AtomicRef.init(Map.empty[SessionId, Managed])
       connections <- AtomicRef.init(Map.empty[ClientId, Connected])
       lastIndex <- AtomicInt.init(0)
       lastClient <- AtomicInt.init(0)
-    yield new HostSessions(command, pushInterval, sessions, connections, lastIndex, lastClient)
+    yield new HostSessions(command, sessions, connections, lastIndex, lastClient)
