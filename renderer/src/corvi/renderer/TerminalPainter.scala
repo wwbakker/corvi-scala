@@ -2,7 +2,6 @@ package corvi.renderer
 
 import corvi.contract.*
 import javafx.scene.canvas.GraphicsContext
-import javafx.scene.paint.Color
 import javafx.scene.text.{Font, Text, TextAlignment}
 
 /** Paints a `ScreenModel`. All the arithmetic is `Layout` and all the colours are `TerminalStyle`, so this only decides the order of the
@@ -61,7 +60,11 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
           gc.setFill(if current then style.findCurrentFill else style.findFill)
           gc.fillRect(x, y, layout.cellWidth, layout.cellHeight)
         }
-        if cell.text.nonEmpty && cell.text != " " then drawGlyph(gc, cell, x, y, style.foreground(cell, theme))
+      paintTextRow(gc, cells, row, theme)
+      for col <- 0 until math.min(model.cols, cells.size) do
+        val cell = cells(col)
+        val x = layout.cellX(col)
+        val y = layout.cellY(row)
         if hoveredLink.exists(uri => hovered.exists(_.row == row) && cell.link.contains(uri)) then
           gc.setStroke(style.cursor)
           gc.setLineWidth(1)
@@ -76,21 +79,60 @@ final class TerminalPainter(metrics: TerminalMetrics, style: TerminalStyle):
     // the cursor so a block cursor cannot hide it, and it never touches the host's cells.
     if model.isLive then preedit.foreach(value => paintPreedit(gc, model, theme, value))
 
-  /** A glyph, in the font its attributes ask for (bold and italic together when both are set), with the underline drawn as a hairline under
-    * the cell.
+  /** Paints a row's text in style runs instead of one `fillText` per cell. A terminal row is usually one colour/font for its whole width;
+    * grouping turns 15k canvas text calls into a few dozen. Spaces are kept inside the run so glyph positions still follow the cell grid;
+    * continuation cells and wide characters keep their two-cell glyph.
     */
-  private def drawGlyph(gc: GraphicsContext, cell: Cell, x: Double, y: Double, colour: Color): Unit =
-    gc.setFont((cell.bold, cell.italic) match
+  private def paintTextRow(gc: GraphicsContext, cells: Vector[Cell], row: Int, theme: TerminalTheme): Unit =
+    var col = 0
+    while col < cells.size do
+      val first = cells(col)
+      val colour = style.foreground(first, theme)
+      val font = fontFor(first)
+      val text = new java.lang.StringBuilder()
+      val start = col
+      var hasGlyph = false
+      while col < cells.size && sameTextStyle(cells(col), first) do
+        val cell = cells(col)
+        if cell.width != CellWidth.Continuation then
+          if cell.text.isEmpty then { val _ = text.append(' ') }
+          else
+            text.append(cell.text)
+            if cell.text != " " then hasGlyph = true
+        col += 1
+      if hasGlyph then
+        gc.setFont(font)
+        gc.setFill(colour)
+        gc.fillText(text.toString, layout.cellX(start), layout.cellY(row) + metrics.ascent)
+        if first.underline then
+          gc.setStroke(colour)
+          gc.setLineWidth(1)
+          gc.strokeLine(
+            layout.cellX(start),
+            layout.cellY(row) + layout.cellHeight - 1.5,
+            layout.cellX(col),
+            layout.cellY(row) + layout.cellHeight - 1.5
+          )
+      else if first.underline then
+        gc.setStroke(colour)
+        gc.setLineWidth(1)
+        gc.strokeLine(
+          layout.cellX(start),
+          layout.cellY(row) + layout.cellHeight - 1.5,
+          layout.cellX(col),
+          layout.cellY(row) + layout.cellHeight - 1.5
+        )
+
+  private def sameTextStyle(cell: Cell, first: Cell): Boolean =
+    cell.bold == first.bold && cell.italic == first.italic && cell.underline == first.underline &&
+      cell.foreground == first.foreground && cell.background == first.background && cell.inverse == first.inverse
+
+  private def fontFor(cell: Cell): Font =
+    (cell.bold, cell.italic) match
       case (true, true)   => boldItalic
       case (true, false)  => bold
       case (false, true)  => italic
-      case (false, false) => metrics.font)
-    gc.setFill(colour)
-    gc.fillText(cell.text, x, y + metrics.ascent)
-    if cell.underline then
-      gc.setStroke(colour)
-      gc.setLineWidth(1)
-      gc.strokeLine(x, y + layout.cellHeight - 1.5, x + layout.cellWidth, y + layout.cellHeight - 1.5)
+      case (false, false) => metrics.font
 
   /** The cursor in the shape the terminal asked for. `None` is a block, which is what a terminal without DECSCUSR shows.
     *
