@@ -22,6 +22,9 @@ import scala.concurrent.duration.*
   */
 object HostMain extends KyoApp:
 
+  /** Backpressure is on in the daemon; the in-memory probes opt out because their sinks do not acknowledge. */
+  private val backpressure: Boolean = sys.env.get("CORVI_HOST_BACKPRESSURE").forall(_ != "0")
+
   run {
     for
       // The daemon's scope is run here so the process can exit *after* it has closed: `KyoApp` treats a successful body as "nothing to
@@ -47,7 +50,7 @@ object HostMain extends KyoApp:
         val _ = Files.deleteIfExists(paths.socket)
         val _ = Files.deleteIfExists(paths.ownerFile)
       })
-      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(HostSession.loginShell)))(_.shutdown)
+      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(HostSession.loginShell, backpressure)))(_.shutdown)
       stop <- Latch.init(1)
       startedAt <- Sync.defer(java.lang.System.currentTimeMillis())
       _ <- Fiber.init(acceptLoop(server, host, token, stop, startedAt))

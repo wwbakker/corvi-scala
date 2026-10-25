@@ -72,6 +72,8 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   def close(session: SessionId): Unit = offer(Command.Close(session, None))
 
+  override def ack(session: SessionId, seq: Long): Unit = offer(Command.Ack(session, seq))
+
   /** Ends the client's runtime. Commands queued before this are served; the close marker ends the loop, and anything offered afterwards is
     * inert. Closing is one atomic step on the queue itself, so no command can slip past a check and be served after the close.
     */
@@ -127,6 +129,8 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
               .map(_ => (events, false))
           case Some(Command.Resize(id, size)) =>
             perform(events.get(id), "resize")(service.resize(id, size)).map(_ => (events, false))
+          case Some(Command.Ack(id, seq)) =>
+            perform(None, "ack")(service.ack(id, seq)).map(_ => (events, false))
           case Some(Command.History(id, from, count)) =>
             performed(events.get(id), "history")(service.history(id, from, count))(rows =>
               events.get(id).foreach(target => onFx(() => target.history(rows.toVector)))
@@ -285,6 +289,7 @@ private[app] object Client:
     case Focus(session: SessionId, focused: Boolean)
     case Resize(session: SessionId, size: TermSize)
     case History(session: SessionId, from: Int, count: Int)
+    case Ack(session: SessionId, seq: Long)
 
   /** The commands FX offers the client's runtime, and the close that ends it.
     *

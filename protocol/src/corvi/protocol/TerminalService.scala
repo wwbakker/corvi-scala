@@ -36,11 +36,20 @@ private[corvi] trait TerminalService:
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
 
+  /** Acknowledges a frame sequence after the renderer has applied it, releasing the host's one-frame backpressure window. */
+  def ack(id: SessionId, seq: Long)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+
 /** Where the host's pushes land on the client: damage as it is produced, and the session's end. A renderer applies the first to its frame
   * and marks the tab from the second.
   */
 private[corvi] trait FrameSink:
   def damage(id: SessionId, damage: Damage): Unit < Sync
+
+  /** The framed variant: `seq` is acknowledged by a view that owns the host's backpressure window. Test sinks can keep the old seam. */
+  def damage(id: SessionId, seq: Long, damage: Damage): Unit < Sync =
+    val _ = seq
+    this.damage(id, damage)
+
   def ended(id: SessionId, ended: Ended): Unit < Sync
 
 /** `TerminalService` over a `kyo-jsonrpc` peer handler. */
@@ -89,6 +98,9 @@ private[corvi] final class TerminalClient(handler: JsonRpcHandler) extends Termi
 
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[SessionParams, Unit](Methods.Close, SessionParams(id)))
+
+  def ack(id: SessionId, seq: Long)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[AckParams, Unit](Methods.Ack, AckParams(id, seq)))
 
   /** A wire failure becomes the typed error the host raised: the code says which one, and `data` carries its fields. Anything else is kept
     * as the peer described it, rather than being flattened into a message string.

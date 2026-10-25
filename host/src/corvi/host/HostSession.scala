@@ -65,6 +65,10 @@ private[corvi] final class HostSession private[host] (
   /** Blocks until the emulator applies output or the grid is resized. The push loop is the only reader, so a wake cannot be lost. Returns
     * false when the wait was interrupted, which is how a closing host stops its push loop without spinning on an interrupted thread.
     */
+  /** Wakes the push loop without claiming a new screen change; an acknowledgement clears the client's in-flight frame. */
+  private[host] def wake(): Unit =
+    val _ = screenChanges.offer(())
+
   private[host] def awaitScreenChange(): Boolean =
     try
       screenChanges.take()

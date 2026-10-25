@@ -207,6 +207,7 @@ final class ReconnectTest:
     def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
     def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
+    def ack(id: SessionId, seq: Long)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) = Sync.defer(())
 
   private def snapshot(id: SessionId): Snapshot =
     Snapshot(

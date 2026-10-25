@@ -444,6 +444,7 @@ object HostDaemonProbe:
       .redirectOutput(java.lang.ProcessBuilder.Redirect.appendTo(log.toFile))
       .redirectErrorStream(true)
     val _ = builder.environment().put("CORVI_HOST_SOCKET", paths.socket.toString)
+    val _ = builder.environment().put("CORVI_HOST_BACKPRESSURE", "0")
     builder.start()
 
   private def awaitSocket(socket: Path): Boolean = poll(waitTimeout)(answers(socket))

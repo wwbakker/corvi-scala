@@ -27,3 +27,6 @@ trait SessionCalls:
   def resize(session: SessionId, size: TermSize): Unit
   def history(session: SessionId, from: Int, count: Int): Unit
   def close(session: SessionId): Unit
+
+  /** A sequence has been applied to the model; the default is for harnesses that do not use host backpressure. */
+  def ack(session: SessionId, seq: Long): Unit = ()

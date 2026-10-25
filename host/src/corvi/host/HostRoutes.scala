@@ -46,7 +46,8 @@ private[corvi] object HostRoutes:
       JsonRpcRoute.request[MouseParams, Unit](Methods.Mouse)((params, _) => guarded(connection)(host.mouse(params.id, params.input))),
       JsonRpcRoute.request[KeyParams, Unit](Methods.Key)((params, _) => guarded(connection)(host.key(params.id, params.input))),
       JsonRpcRoute.request[FocusParams, Unit](Methods.Focus)((params, _) => guarded(connection)(host.focus(params.id, params.focused))),
-      JsonRpcRoute.request[ResizeParams, Unit](Methods.Resize)((params, _) => guarded(connection)(host.resize(params.id, params.size)))
+      JsonRpcRoute.request[ResizeParams, Unit](Methods.Resize)((params, _) => guarded(connection)(host.resize(params.id, params.size))),
+      JsonRpcRoute.request[AckParams, Unit](Methods.Ack)((params, _) => guarded(connection)(host.ack(connection.id, params.id, params.seq)))
     ).map(route =>
       route
         .error[UnknownSession](TerminalError.UnknownSessionCode, "unknown session")

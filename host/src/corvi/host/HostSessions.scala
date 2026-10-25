@@ -4,6 +4,7 @@ import corvi.contract.*
 import corvi.protocol.*
 import corvi.protocol.Messages.*
 import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicLong
 import kyo.*
 import kyo.Frame
 
@@ -25,6 +26,7 @@ import kyo.Frame
   */
 private[corvi] final class HostSessions private (
     command: Seq[String],
+    backpressure: Boolean,
     sessions: AtomicRef[Map[SessionId, HostSessions.Managed]],
     connections: AtomicRef[Map[ClientId, HostSessions.Connected]],
     lastIndex: AtomicInt,
@@ -127,6 +129,23 @@ private[corvi] final class HostSessions private (
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[UnknownSession | SessionEnded]) =
     live(id).map(managed => managed.session.resize(size))
 
+  /** Releases one client's in-flight frame and wakes the session so pending output can become the next frame. A stale or duplicate ack is
+    * harmless: it only clears the sequence that is still current.
+    */
+  def ack(client: ClientId, id: SessionId, seq: Long)(using Frame): Unit < Sync =
+    for
+      _ <- connections
+        .updateAndGet(current =>
+          current.updatedWith(client) { existing =>
+            existing.map(connected =>
+              if connected.inflight.get(id).contains(seq) then connected.copy(inflight = connected.inflight - id) else connected
+            )
+          }
+        )
+        .map(_ => ())
+      _ <- sessions.get.map(all => all.get(id).foreach(_.session.wake()))
+    yield ()
+
   /** Closes the shell and ends the scope that owned it. The session's push loop reports the end to every client still attached to it — a
     * client that closes a session still expects `session.ended` — and only then drops their baselines, because the end is the last thing
     * the session ever says. `close` therefore never drops a baseline itself: doing it here would race a shell that exited naturally in the
@@ -144,7 +163,11 @@ private[corvi] final class HostSessions private (
   /** Forgets a session's baseline in every client: the session is gone, so nothing may keep sampling it. */
   private def dropBaselines(id: SessionId)(using Frame): Unit < Sync =
     connections
-      .updateAndGet(current => current.map { case (client, connected) => client -> connected.copy(attached = connected.attached - id) })
+      .updateAndGet(current =>
+        current.map { case (client, connected) =>
+          client -> connected.copy(attached = connected.attached - id, inflight = connected.inflight - id)
+        }
+      )
       .map(_ => ())
 
   /** Ends every session: the scope that owns this service calls it, and each session's own scope follows. */
@@ -219,7 +242,8 @@ private[corvi] final class HostSessions private (
         case Maybe.Present(Result.Panic(error))   => Abort.fail(SessionFailed(id, error.toString))
         case Maybe.Absent                         => Abort.fail(SessionFailed(id, "the shell did not start"))
       closed <- AtomicRef.init(false)
-    yield Managed(session, stop, closed)
+      nextSeq <- Sync.defer(new AtomicLong(0))
+    yield Managed(session, stop, closed, nextSeq)
 
   private def startPush(managed: Managed)(using Frame): Unit < Sync =
     Fiber.initUnscoped(pushLoop(managed)).map(_ => ())
@@ -238,29 +262,41 @@ private[corvi] final class HostSessions private (
     loop
 
   private def pushDamage(managed: Managed)(using Frame): Unit < Async =
+    val sessionId = managed.session.id
+    def advance(client: ClientId, frame: Snapshot, seq: Option[Long]): Unit < Sync =
+      connections
+        .updateAndGet(current =>
+          current.updatedWith(client) { existing =>
+            existing.map(connected =>
+              connected.copy(
+                attached = connected.attached.updated(sessionId, frame),
+                inflight =
+                  if backpressure then seq.fold(connected.inflight)(value => connected.inflight.updated(sessionId, value))
+                  else connected.inflight
+              )
+            )
+          }
+        )
+        .map(_ => ())
     def one(client: ClientId, baseline: Snapshot): Unit < Async =
       for
         step <- Sync.defer(managed.session.frameSince(baseline))
         (frame, damage) = step
-        _ <- if damage.isEmpty then Sync.defer(()) else push(client, Methods.Damage, DamageParams(frame.id, DamageCodec.encode(damage)))
-        // The baseline moves with the delta, whether or not the send was delivered: `send` logs a failure and carries on, because a failed
-        // push means the peer's connection is gone and its unbind removes the entry. `updatedWith` on the entry and on the session keeps a client, or a session, that was unbound or closed
-        // while this tick was in flight out of the registry: `updated` would put it back and sample it forever.
-        _ <- connections
-          .updateAndGet(current =>
-            current.updatedWith(client) { existing =>
-              existing.map(connected =>
-                connected.copy(attached = connected.attached.updatedWith(managed.session.id)(current => current.map(_ => frame)))
-              )
-            }
-          )
-          .map(_ => ())
+        _ <-
+          if damage.isEmpty then advance(client, frame, None)
+          else
+            val seq = managed.nextSeq.incrementAndGet()
+            for
+              // The baseline and in-flight marker move before the write, so an acknowledgement cannot race the registry update.
+              _ <- advance(client, frame, Some(seq))
+              _ <- push(client, Methods.Damage, DamageParams(frame.id, seq, DamageCodec.encode(damage)))
+            yield ()
       yield ()
     for
       current <- connections.get
       watchers = current.toVector.collect {
-        case (client, connected) if connected.attached.contains(managed.session.id) =>
-          (client, connected.attached(managed.session.id))
+        case (client, connected) if connected.attached.contains(sessionId) && !(backpressure && connected.inflight.contains(sessionId)) =>
+          (client, connected.attached(sessionId))
       }
       _ <- Async.foreachDiscard(watchers)((client, baseline) => one(client, baseline))
     yield ()
@@ -306,16 +342,20 @@ private[corvi] object HostSessions:
   /** One connection: its peer handler, and this client's baseline frame for every session it has attached to. One entry, because a client
     * with a baseline and no handler is a screen that never updates again.
     */
-  private[corvi] final case class Connected(handler: JsonRpcHandler, attached: Map[SessionId, Snapshot])
+  private[corvi] final case class Connected(
+      handler: JsonRpcHandler,
+      attached: Map[SessionId, Snapshot],
+      inflight: Map[SessionId, Long] = Map.empty
+  )
 
   /** A session, the latch that ends the scope holding it, and whether a client ended it. */
-  private[corvi] final case class Managed(session: HostSession, stop: Latch, closed: AtomicRef[Boolean])
+  private[corvi] final case class Managed(session: HostSession, stop: Latch, closed: AtomicRef[Boolean], nextSeq: AtomicLong)
 
   /** The shell to run is a parameter so a caller can prove what a shell that cannot start does. */
-  def init(command: Seq[String])(using Frame): HostSessions < Sync =
+  def init(command: Seq[String], backpressure: Boolean = false)(using Frame): HostSessions < Sync =
     for
       sessions <- AtomicRef.init(Map.empty[SessionId, Managed])
       connections <- AtomicRef.init(Map.empty[ClientId, Connected])
       lastIndex <- AtomicInt.init(0)
       lastClient <- AtomicInt.init(0)
-    yield new HostSessions(command, sessions, connections, lastIndex, lastClient)
+    yield new HostSessions(command, backpressure, sessions, connections, lastIndex, lastClient)

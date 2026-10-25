@@ -20,6 +20,7 @@ object Methods:
   val Focus: String = "session.focus"
   val Resize: String = "session.resize"
   val Damage: String = "session.damage"
+  val Ack: String = "session.ack"
   val Ended: String = "session.ended"
 
   // The daemon's own methods, which every connection needs before it can touch a session.
@@ -34,6 +35,8 @@ object ClientRoutes:
 
   def routes(sink: FrameSink)(using Frame): Seq[JsonRpcRoute[?, ?, ?]] =
     Seq(
-      JsonRpcRoute.notification[DamageParams](Methods.Damage)((params, _) => sink.damage(params.id, DamageCodec.decode(params.payload))),
+      JsonRpcRoute.notification[DamageParams](Methods.Damage)((params, _) =>
+        sink.damage(params.id, params.seq, DamageCodec.decode(params.payload))
+      ),
       JsonRpcRoute.notification[EndedParams](Methods.Ended)((params, _) => sink.ended(params.id, params.ended))
     )

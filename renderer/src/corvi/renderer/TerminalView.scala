@@ -87,7 +87,7 @@ final class TerminalView(
   /** Latest damage waiting for the FX thread, coalesced: a client that falls behind applies the newest screen instead of queueing one
     * `Platform.runLater` per frame. The boolean is the single scheduled drain.
     */
-  private val batchedDamage: AtomicReference[Option[Damage]] = new AtomicReference(None)
+  private val batchedDamage: AtomicReference[Option[(Long, Damage)]] = new AtomicReference(None)
   private val batchScheduled: AtomicBoolean = new AtomicBoolean(false)
 
   /** The grid the last resize asked for, until the host's frame confirms it: the answer is a round trip away and the view must not ask
@@ -601,7 +601,11 @@ final class TerminalView(
   // --- the runtime's side ---------------------------------------------------------------------------------------------------------
 
   override def damage(id: SessionId, damage: Damage): Unit < Sync =
-    pushDamage(id, damage)
+    pushDamage(id, 0L, damage)
+    Sync.defer(())
+
+  override def damage(id: SessionId, seq: Long, damage: Damage): Unit < Sync =
+    pushDamage(id, seq, damage)
     Sync.defer(())
 
   override def ended(id: SessionId, ended: Ended): Unit < Sync =
@@ -611,11 +615,15 @@ final class TerminalView(
   /** A push, from whichever thread the host is on; the view hops to the FX thread itself. A sink shared by several tabs calls this
     * directly, because a session's damage goes only to the view that shows that session.
     */
-  def pushDamage(id: SessionId, damage: Damage): Unit =
+  def pushDamage(id: SessionId, damage: Damage): Unit = pushDamage(id, 0L, damage)
+
+  def pushDamage(id: SessionId, seq: Long, damage: Damage): Unit =
     if id == session then
-      if Platform.isFxApplicationThread then applyDamage(damage)
+      if Platform.isFxApplicationThread then
+        applyDamage(damage)
+        calls.ack(session, seq)
       else
-        val _ = batchedDamage.updateAndGet(current => Some(current.fold(damage)(_.merge(damage))))
+        val _ = batchedDamage.updateAndGet(current => Some(current.fold((seq, damage))((_, existing) => (seq, existing.merge(damage)))))
         if batchScheduled.compareAndSet(false, true) then
           val _ = Platform.runLater(() => drainBatchedDamage())
 
@@ -625,8 +633,11 @@ final class TerminalView(
   private def drainBatchedDamage(): Unit =
     val next = batchedDamage.getAndSet(None)
     batchScheduled.set(false)
-    next.foreach(applyDamage)
-    if batchedDamage.get().exists(damage => !damage.isEmpty) && batchScheduled.compareAndSet(false, true) then
+    next.foreach { (seq, damage) =>
+      applyDamage(damage)
+      calls.ack(session, seq)
+    }
+    if batchedDamage.get().exists((_, damage) => !damage.isEmpty) && batchScheduled.compareAndSet(false, true) then
       val _ = Platform.runLater(() => drainBatchedDamage())
 
   def pushEnded(id: SessionId, ended: Ended): Unit =
