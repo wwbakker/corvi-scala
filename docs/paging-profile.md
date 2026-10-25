@@ -42,3 +42,23 @@ The first profile on this machine (186×83, copied 7.4 MB Pi session, hardware E
 
 The software run was within a few percent of the hardware run: rendering is not the dominant cost at this size. The frame payload and
 the JSON codec are.
+
+## Optimization history
+
+The probe was run at each production change (hardware ES2, 186x83, same copied session):
+
+| Change | App CPU | Host CPU | PageUp steps | PageDown steps | App heap |
+|---|---:|---:|---:|---:|---:|
+| baseline JSON damage | 23.3 s | 6.9 s | 6.58 s | 6.61 s | 175 MB |
+| `d838258` binary damage | 4.2 s | 4.4 s | 3.77 s | 3.63 s | 175 MB |
+| `12f34fd` one-frame ack | 4.9 s | 5.1 s | 4.3 s | 4.15 s | 37 MB |
+| `737ca4e` changed-row damage | 4.4 s | 4.0 s | 4.2 s | 4.0 s | 69 MB |
+| `18a4fe2` text runs | 4.4 s | 4.7 s | 4.2 s | 4.0 s | 49 MB |
+
+The binary codec is the large win: host socket traffic fell from roughly 74.5 MB to under 1 MB for the measured window. One-frame
+acknowledgement trades a little latency for bounded memory and no stale frame backlog. A dedicated socket-writer thread was also tested
+and reverted: with one in-flight frame, writes are small, and the extra queue/thread cost more CPU without reducing the page latency.
+
+The probe window lives on workspace 6, so it is not composited by the active workspace. That exercises the model, renderer and protocol,
+but it may understate the cost of presenting painted frames on screen. The next benchmark should either force a scene snapshot after the
+burst or run the window on the active workspace; painting is the next thing to measure before changing threads further.
