@@ -107,11 +107,13 @@ The **host interprets the terminal**; the frontend only renders it.
   refused rather than replacing the other peer.
 - **Pushes**: one loop per session samples every `pushInterval` (an `init` parameter; the probes run
   at 200 ms, the host at 16 ms) and sends a delta only when one is non-empty, and only to clients
-  that attached — a session nobody is watching is not even sampled. Sampling *is* the coalescer:
-  everything since the previous tick leaves as one delta, and an unchanged frame costs nothing on
-  the wire. Waking the loop from the reader (a `Channel`/`Signal` per session, once the host is a
-  `KyoApp`) is a later refinement; the current loops use `Fiber.initUnscoped` because a route handler
-  has no scope.
+  that attached — a session nobody is watching is not even sampled. The host session keeps a
+  generation counter that advances when the emulator applies output or the grid is resized, so a
+  watched but idle session costs one atomic read per tick instead of a full-screen snapshot and
+  diff. Sampling *is* the coalescer: everything since the previous tick leaves as one delta, and an
+  unchanged frame costs nothing on the wire. Waking the loop from the reader (a `Channel`/`Signal`
+  per session, once the host is a `KyoApp`) is a later refinement; the current loops use
+  `Fiber.initUnscoped` because a route handler has no scope.
 - **Client** (`TerminalService`): UI-free, no `kyo-jsonrpc` in its signatures, with a `FrameSink` for
   the two pushes. `TerminalPeers.inMemory` wires a host peer and a client peer over
   `JsonRpcTransport.inMemory`; the Unix-socket phase replaces only the transport.
@@ -197,7 +199,8 @@ they start a real host.
 - **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, find highlights, glyph (bold/italic via
   cached fonts, underline as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model, selection, IME
   preedit and find highlights and calls the painter; blinking is a timeline the view switches on when the frame's cursor blinks, and off
-  for captures.
+  for captures. A `TerminalView` in a background tab applies damage to its model but does not paint: the visible tab is the only one that
+  draws, and selecting a hidden tab repaints its current frame instead of replaying the deltas it missed.
 - **Focus.** A window without the keyboard draws the cursor hollow — stroke only, no fill and no glyph redraw, so the cell keeps its own
   colour: it says where the cursor would be, not that it has focus. Focus is a base flag the view sets from its own `focusedProperty`, with an
   override a harness can drive, because a canvas never takes the keyboard itself.

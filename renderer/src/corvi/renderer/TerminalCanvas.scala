@@ -90,6 +90,12 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     baseFocus = focused
     if focusOverride.isEmpty then repaint()
 
+  /** Pauses the blink while the view is hidden: a background tab must not repaint its whole canvas twice a second for a cursor nobody can
+    * see. `show` on the next reveal resumes it from the frame's blink state.
+    */
+  def pauseBlink(): Unit =
+    blink.pause()
+
   /** Stops the one animation this canvas owns. A view removes its node from the scene when its tab closes; a timeline that is still playing
     * would keep the canvas alive after that.
     */

@@ -226,17 +226,19 @@ private[corvi] final class HostSessions private (
     Fiber.initUnscoped(pushLoop(managed)).map(_ => ())
 
   /** Pushes what changed to each client attached to this session, until the shell is gone. Sampling is the coalescer: everything that
-    * arrived since the previous tick leaves as one delta per client, an unchanged frame costs nothing on the wire, and a session nobody is
-    * watching is not sampled at all.
+    * arrived since the previous tick leaves as one delta per client, an unchanged frame costs nothing on the wire, and a session whose
+    * screen did not change is not even snapshotted. The generation is the host session's own record of applied output and resizes, so an
+    * idle shell costs one atomic read per tick instead of a full-screen diff every 16 ms.
     */
   private def pushLoop(managed: Managed)(using Frame): Unit < Async =
-    def loop: Unit < Async =
+    def loop(previousGeneration: Long): Unit < Async =
       for
         _ <- Async.sleep(pushInterval)
-        _ <- pushDamage(managed)
-        _ <- if managed.session.info.running then loop else pushEnded(managed)
+        currentGeneration <- Sync.defer(managed.session.generation)
+        _ <- if currentGeneration != previousGeneration then pushDamage(managed) else Sync.defer(())
+        _ <- if managed.session.info.running then loop(currentGeneration) else pushEnded(managed)
       yield ()
-    loop
+    loop(-1L)
 
   private def pushDamage(managed: Managed)(using Frame): Unit < Async =
     def one(client: ClientId, baseline: Snapshot): Unit < Async =
@@ -268,6 +270,8 @@ private[corvi] final class HostSessions private (
 
   private def pushEnded(managed: Managed)(using Frame): Unit < Async =
     for
+      // A shell can exit after its last output landed between two ticks: take one final frame before saying it has ended.
+      _ <- pushDamage(managed)
       closed <- managed.closed.get
       code <- Sync.defer(managed.session.exitCode)
       reason <- Sync.defer(managed.session.error.map(_.toString))

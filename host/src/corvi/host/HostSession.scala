@@ -9,7 +9,7 @@ import corvi.contract.*
 import java.io.InterruptedIOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import kyo.*
 // The contract has a `Frame` as well (a client's screen); this file means kyo's source position, so it says so.
 import kyo.Frame
@@ -51,6 +51,11 @@ private[corvi] final class HostSession private[host] (
 
   private val logger = LoggerFactory.getLogger(classOf[HostSession])
 
+  /** Advances whenever the emulator applies output or the grid is resized. The push loop samples a screen only when this changes, so an
+    * idle session costs no snapshots at all instead of one every frame.
+    */
+  private val screenGeneration: AtomicLong = new AtomicLong(0)
+
   /** The shell's process id, which is what a reattaching client compares to be sure it found the same shell. */
   def shellPid: Long = process.pid()
 
@@ -75,6 +80,9 @@ private[corvi] final class HostSession private[host] (
   /** The rows that changed since `before`, plus whatever else in the frame did: what a frontend that drew that snapshot has to repaint. */
   def damageSince(before: Snapshot): Damage = frameSince(before)._2
 
+  /** The value the push loop compares to decide whether the screen can have changed. */
+  private[host] def generation: Long = screenGeneration.get
+
   /** The failure that ended the reader, if it was not a clean end. */
   def error: Option[Throwable] = failure.get
 
@@ -97,6 +105,7 @@ private[corvi] final class HostSession private[host] (
     val target = CoreTermSize(size.cols, size.rows)
     terminal.resize(target, RequestOrigin.User)
     connector.resize(target)
+    val _ = screenGeneration.incrementAndGet()
 
   /** Types at the shell, for the headless checks. */
   def write(text: String): Unit = connector.write(text)
@@ -140,7 +149,10 @@ private[corvi] final class HostSession private[host] (
       enabled => display.setFocusReporting(enabled)
     )
     val emulator = new JediEmulator(stream, terminal)
-    try while emulator.hasNext do emulator.next()
+    try
+      while emulator.hasNext do
+        emulator.next()
+        val _ = screenGeneration.incrementAndGet()
     catch
       // The read was interrupted: that is how a session ends, not a failure.
       case _: InterruptedIOException => ()

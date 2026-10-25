@@ -79,7 +79,7 @@ failure.
 ./mill -i renderer.test                                 # 51 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit, search, links
 ./mill -i host.test                                     # JUnit tests: registry, binds, key/mouse/focus/paste input
 ./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
-./mill -i host.test.runMain corvi.host.HostProbe        # 58 checks: PTY, VT emulation, keys, links, snapshot/damage, history, resize
+./mill -i host.test.runMain corvi.host.HostProbe        # 60 checks: PTY, VT emulation, keys, links, snapshot/damage, history, resize
 ./mill -i host.test.runMain corvi.host.ProtocolProbe    # 33 checks: routes, typed errors, links, auth, pushes, reconnects
 ./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
 ./mill -i app.test.runMain corvi.app.RendererProbe      # 39 checks: the renderer, paste, IME, font size, find, selection, scrollback, captures

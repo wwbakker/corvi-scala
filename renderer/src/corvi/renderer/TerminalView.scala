@@ -137,6 +137,12 @@ final class TerminalView(
     // The scrollbar runs the other way round from the model: its bottom is the live grid, because that is where a scrollbar's "end" is.
     val _ = scrollbar.valueProperty().addListener((_, _, value) => scrollTo(math.round(scrollbar.getMax() - value.doubleValue()).toInt))
     val _ = focusedProperty().addListener((_, _, focused) => focusChanged(focused))
+    // A terminal in a background tab still receives frames, but painting it would compete with the tab on screen. It applies the model
+    // while hidden, draws once when the shell makes it visible again, and pauses the cursor blink in between.
+    val _ = visibleProperty().addListener((_, _, visible) =>
+      if visible then redraw()
+      else canvas.pauseBlink()
+    )
     val _ = widthProperty().addListener((_, _, _) => scheduleResize())
     val _ = heightProperty().addListener((_, _, _) => scheduleResize())
     val _ = findBar.field.textProperty().addListener((_, _, _) => runFind())
@@ -777,17 +783,20 @@ final class TerminalView(
   // --- painting and layout ---------------------------------------------------------------------------------------------------------
 
   private def redraw(): Unit =
-    model.foreach { current =>
-      // A new frame while the user is reading history keeps the viewport where it is and marks that output arrived.
-      if current.isLive != liveBefore then
-        liveBefore = current.isLive
-        updateScrollbar(current)
-      val shouldBlink = blinkOverride.getOrElse(current.frame.cursor.blinking)
-      if shouldBlink != blinking then
-        blinking = shouldBlink
-        canvas.setBlinking(shouldBlink)
-      canvas.show(current, selection)
-    }
+    // Only the visible tab draws. Every mounted tab still advances its model, so switching back is a repaint of the current frame rather
+    // than a replay of every delta that arrived while it was hidden.
+    if isVisible then
+      model.foreach { current =>
+        // A new frame while the user is reading history keeps the viewport where it is and marks that output arrived.
+        if current.isLive != liveBefore then
+          liveBefore = current.isLive
+          updateScrollbar(current)
+        val shouldBlink = blinkOverride.getOrElse(current.frame.cursor.blinking)
+        if shouldBlink != blinking then
+          blinking = shouldBlink
+          canvas.setBlinking(shouldBlink)
+        canvas.show(current, selection)
+      }
 
   /** Asks the host for the part of the scrollback this viewport now needs. The request is deduped until an answer lands, because a reader
     * who is scrolled back while a command produces output would otherwise ask again on every damage tick.

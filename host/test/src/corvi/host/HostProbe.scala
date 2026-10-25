@@ -447,15 +447,25 @@ object HostProbe:
     val report = reporter.report
     for
       baseline <- settledSnapshot(session)
+      generationBeforeOutput = session.generation
       _ = session.write("echo DAMAGE_OK\n")
-      damaged <- await(session)(snapshot => lines(snapshot).contains("DAMAGE_OK"))
-      damage = session.damageSince(baseline)
+      _ <- await(session)(snapshot => lines(snapshot).contains("DAMAGE_OK"))
+      // Let the shell's own repaint (prompt, bracketed-paste reset) finish before taking the delta. The frame and the damage come from one
+      // `frameSince`, so later output cannot make the snapshot and the delta describe different instants.
+      _ <- settledSnapshot(session)
+      (damaged, damage) = session.frameSince(baseline)
+      generationAfterOutput = session.generation
+      _ = report(
+        "output advances the screen generation",
+        generationAfterOutput > generationBeforeOutput,
+        s"$generationBeforeOutput -> $generationAfterOutput"
+      )
       damagedRows = damage.rows.map(_.row).toSet
       _ = report("damage lists the rows that changed", damage.rows.nonEmpty, s"${damage.rows.size} rows")
       _ = report(
         "and exactly those",
-        exactRows(baseline, damaged, damage) && damagedRows.size < baseline.size.rows,
-        s"damaged ${damagedRows.toVector.sorted.mkString(",")} of ${baseline.size.rows}"
+        exactRows(baseline, damaged, damage),
+        s"size ${baseline.size} -> ${damaged.size}, damaged ${damagedRows.toVector.sorted.mkString(",")}, changed ${changedRows(baseline, damaged).toVector.sorted.mkString(",")}"
       )
       _ = report("the damaged row holds the new text", damage.rows.exists(change => rowText(change.cells).contains("DAMAGE_OK")), "")
       _ = report(
@@ -466,6 +476,12 @@ object HostProbe:
       settled = session.snapshot()
       idle = session.damageSince(settled)
       _ = report("and nothing when nothing changed", idle.isEmpty, s"${idle.rows.size} rows")
+      quiet <- Async.timeout(10.seconds)(quietGeneration)
+      _ = report(
+        "and a quiet screen does not advance the screen generation",
+        quiet._1 == quiet._2,
+        s"${quiet._1} -> ${quiet._2}"
+      )
 
       // A cursor-only change: no text at all, so the rows must not be damaged and the cursor must be.
       cursorBaseline <- cursorOnlyBaseline(session)
@@ -517,6 +533,21 @@ object HostProbe:
         s"${grownDelta.rows.size} rows of ${taller.rows}, applying it gives ${grownFrame.rows.size} rows: ${grownDelta.applyTo(sameWidthBaseline) == grownFrame}"
       )
     yield ()
+
+  /** A shell provably blocked in a foreground read, so the measured window cannot contain a prompt redraw or job notification. */
+  private def quietGeneration(using Frame): (Long, Long) < (Async & Abort[Any]) =
+    Scope.run {
+      for
+        temporary <- HostSession.open(SessionId("quiet"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
+        _ <- await(temporary)(snapshot => text(snapshot).trim.nonEmpty)
+        _ <- Sync.defer(temporary.write("read quiet\n"))
+        _ <- await(temporary)(snapshot => text(snapshot).contains("read quiet"))
+        before = temporary.generation
+        _ <- Async.sleep(200.millis)
+        after = temporary.generation
+        _ <- Sync.defer(temporary.close())
+      yield (before, after)
+    }
 
   /** Two sessions at once, and a session closed by hand. */
   private def isolationAndTeardownChecks(session: HostSession, reporter: Reporter)(using
@@ -646,8 +677,11 @@ object HostProbe:
     * whenever it likes, so this is the invariant a client depends on - not "no rows changed".
     */
   private def exactRows(before: Snapshot, after: Snapshot, damage: Damage): Boolean =
-    val changed = after.rows.zipWithIndex.collect { case (row, index) if before.rows.lift(index).forall(_ != row) => index }.toSet
-    changed == damage.rows.map(_.row).toSet
+    changedRows(before, after) == damage.rows.map(_.row).toSet
+
+  /** The row indexes whose cells differ between two frames. */
+  private def changedRows(before: Snapshot, after: Snapshot): Set[Int] =
+    after.rows.zipWithIndex.collect { case (row, index) if before.rows.lift(index).forall(_ != row) => index }.toSet
 
   /** The first frame that survives a moment without changing: what a baseline has to be for a delta to mean anything. */
   private def settledSnapshot(session: HostSession)(using Frame): Snapshot < Async =
