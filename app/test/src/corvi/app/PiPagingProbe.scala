@@ -107,6 +107,8 @@ object PiPagingProbe:
       startJfr(appPid, "corvi-paging-app", jfrApp)
       host.foreach(pid => startJfr(pid, "corvi-paging-host", jfrHost))
 
+      val paint = paintPhase(window)
+      val typing = typingPhase(view, frames)
       val upStep = stepPhase(view, frames, "pageup-step", KeyCode.PAGE_UP)
       val downStep = stepPhase(view, frames, "pagedown-step", KeyCode.PAGE_DOWN)
       val upBurst = burstPhase(view, frames, "pageup-burst", KeyCode.PAGE_UP)
@@ -128,6 +130,8 @@ object PiPagingProbe:
         hostProcess,
         appPid,
         frames.get,
+        paint,
+        typing,
         upStep,
         downStep,
         upBurst,
@@ -197,6 +201,55 @@ object PiPagingProbe:
       fire(view, code)
       val _ = awaitFrames(frames, before, 2.seconds, 100, 3.seconds)
       val _ = await(2.seconds)(quietFor(view, 200))
+
+  /** Types a few printable characters through the same KEY_TYPED path a keyboard uses and waits for each redraw. Pi's prompt is left
+    * unchanged by backing the characters out again.
+    */
+  private final case class PaintPhase(p50: Double, p95: Double, max: Double, count: Int)
+
+  private def paintPhase(stage: Stage): PaintPhase =
+    val scene = onFx(stage.getScene)
+    val times = Vector.newBuilder[Double]
+    for _ <- 0 until 12 do
+      val began = System.nanoTime()
+      val _ = onFx(scene.snapshot(null))
+      times += (System.nanoTime() - began) / 1e6
+    val values = times.result()
+    def percentile(fraction: Double): Double =
+      values.sorted.apply(math.min(values.size - 1, math.max(0, ((values.size - 1) * fraction).round.toInt)))
+    PaintPhase(percentile(0.5), percentile(0.95), values.max, values.size)
+
+  private def paintLine(paint: PaintPhase): String =
+    f"  paint: samples=${paint.count} p50_ms=${paint.p50}%.1f p95_ms=${paint.p95}%.1f max_ms=${paint.max}%.1f"
+
+  private def typingPhase(view: TerminalPane, frames: AtomicInteger): Phase =
+    val first = Vector.newBuilder[Double]
+    val settle = Vector.newBuilder[Double]
+    var timeouts = 0
+    val initial = frames.get()
+    val start = System.nanoTime()
+    for _ <- 0 until 5 do
+      val before = frames.get()
+      val began = System.nanoTime()
+      fireTyped(view, 'x')
+      val (seen, firstAt, settledAt) = awaitFrames(frames, before, firstFrameTimeout, quietMillis, 8.seconds)
+      if seen then
+        first += (firstAt - began) / 1e6
+        settle += (settledAt - began) / 1e6
+      else timeouts += 1
+    for _ <- 0 until 5 do
+      fire(view, KeyCode.BACK_SPACE)
+      Thread.sleep(20)
+    val _ = await(3.seconds)(quietFor(view, 100))
+    Phase("typing", frames.get() - initial, first.result(), settle.result(), (System.nanoTime() - start) / 1e6, timeouts)
+
+  private def fireTyped(view: TerminalPane, character: Char): Unit =
+    onFx(
+      Event.fireEvent(
+        view,
+        new KeyEvent(KeyEvent.KEY_TYPED, character.toString, "", KeyCode.UNDEFINED, false, false, false, false)
+      )
+    )
 
   private def stepPhase(view: TerminalPane, frames: AtomicInteger, name: String, code: KeyCode): Phase =
     val first = Vector.newBuilder[Double]
@@ -321,6 +374,8 @@ object PiPagingProbe:
       hostProcess: Option[ProcessHandle],
       appPid: Long,
       frames: Int,
+      paint: PaintPhase,
+      typing: Phase,
       upStep: Phase,
       downStep: Phase,
       upBurst: Phase,
@@ -345,8 +400,10 @@ object PiPagingProbe:
       s"  app_pid=$appPid host_pid=${host.getOrElse(-1)} host_alive=${hostProcess.exists(_.isAlive)}",
       s"  frames=$frames app_cpu_ms=${appCpuNanos / 1e6} host_cpu_ms=${hostCpuNanos / 1e6} app_heap_mb=${heap / 1024 / 1024}",
       s"  app_context=${describeContext(appCtxBefore, appCtxAfter)} host_context=${describeContext(hostCtxBefore, hostCtxAfter)}",
+      paintLine(paint),
       s"  app_jfr=$appJfr",
       s"  host_jfr=$hostJfr",
+      phaseLine(typing),
       phaseLine(upStep),
       phaseLine(downStep),
       phaseLine(upBurst),
