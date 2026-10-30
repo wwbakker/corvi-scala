@@ -22,8 +22,10 @@ import scala.concurrent.duration.*
   */
 object HostMain extends KyoApp:
 
-  /** Backpressure is on in the daemon; the in-memory probes opt out because their sinks do not acknowledge. */
-  private val backpressure: Boolean = sys.env.get("CORVI_HOST_BACKPRESSURE").forall(_ != "0")
+  /** Backpressure is opt-in. Binary damage and client-side coalescing already bound the queue; the one-frame acknowledgement round trip
+    * proved slower in the paging profile, and a lost acknowledgement could leave a client waiting forever.
+    */
+  private val backpressure: Boolean = sys.env.get("CORVI_HOST_BACKPRESSURE").contains("1")
 
   run {
     for

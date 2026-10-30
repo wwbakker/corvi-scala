@@ -620,8 +620,8 @@ final class TerminalView(
   def pushDamage(id: SessionId, seq: Long, damage: Damage): Unit =
     if id == session then
       if Platform.isFxApplicationThread then
-        applyDamage(damage)
-        calls.ack(session, seq)
+        try applyDamage(damage)
+        finally calls.ack(session, seq)
       else
         val _ = batchedDamage.updateAndGet(current => Some(current.fold((seq, damage))((_, existing) => (seq, existing.merge(damage)))))
         if batchScheduled.compareAndSet(false, true) then
@@ -634,8 +634,8 @@ final class TerminalView(
     val next = batchedDamage.getAndSet(None)
     batchScheduled.set(false)
     next.foreach { (seq, damage) =>
-      applyDamage(damage)
-      calls.ack(session, seq)
+      try applyDamage(damage)
+      finally calls.ack(session, seq)
     }
     if batchedDamage.get().exists((_, damage) => !damage.isEmpty) && batchScheduled.compareAndSet(false, true) then
       val _ = Platform.runLater(() => drainBatchedDamage())

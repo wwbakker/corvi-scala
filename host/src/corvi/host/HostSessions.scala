@@ -133,18 +133,20 @@ private[corvi] final class HostSessions private (
     * harmless: it only clears the sequence that is still current.
     */
   def ack(client: ClientId, id: SessionId, seq: Long)(using Frame): Unit < Sync =
-    for
-      _ <- connections
-        .updateAndGet(current =>
-          current.updatedWith(client) { existing =>
-            existing.map(connected =>
-              if connected.inflight.get(id).contains(seq) then connected.copy(inflight = connected.inflight - id) else connected
-            )
-          }
-        )
-        .map(_ => ())
-      _ <- sessions.get.map(all => all.get(id).foreach(_.session.wake()))
-    yield ()
+    if !backpressure then Sync.defer(())
+    else
+      for
+        _ <- connections
+          .updateAndGet(current =>
+            current.updatedWith(client) { existing =>
+              existing.map(connected =>
+                if connected.inflight.get(id).contains(seq) then connected.copy(inflight = connected.inflight - id) else connected
+              )
+            }
+          )
+          .map(_ => ())
+        _ <- sessions.get.map(all => all.get(id).foreach(_.session.wake()))
+      yield ()
 
   /** Closes the shell and ends the scope that owned it. The session's push loop reports the end to every client still attached to it — a
     * client that closes a session still expects `session.ended` — and only then drops their baselines, because the end is the last thing
@@ -256,7 +258,14 @@ private[corvi] final class HostSessions private (
     def loop: Unit < Async =
       for
         changed <- Sync.defer(managed.session.awaitScreenChange())
-        _ <- if !changed then Sync.defer(()) else pushDamage(managed)
+        _ <-
+          if !changed then Sync.defer(())
+          else
+            Abort.run[Throwable](pushDamage(managed)).map {
+              case Result.Success(_)     => ()
+              case Result.Failure(error) => java.lang.System.err.println(s"corvi host: pushing ${managed.session.id.value} failed: $error")
+              case Result.Panic(error) => java.lang.System.err.println(s"corvi host: pushing ${managed.session.id.value} panicked: $error")
+            }
         _ <- if !changed then Sync.defer(()) else if managed.session.info.running then loop else pushEnded(managed)
       yield ()
     loop
