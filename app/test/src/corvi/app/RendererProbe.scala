@@ -5,15 +5,17 @@ import corvi.renderer.*
 import corvi.renderer.TerminalView as TerminalPane
 import corvi.host.HostSession
 import java.awt.image.BufferedImage
+import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import javafx.application.Platform
+import javafx.event.Event
 import javafx.scene.Scene
 import javafx.scene.image.WritableImage
+import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, KeyEvent, ScrollEvent}
 import javafx.stage.Stage
 import javax.imageio.ImageIO
-import kyo.Duration
 import scala.concurrent.duration.*
 
 /** The renderer's regression suite: a real host session painted by the real canvas, checked through the frame it was given and the pixels
@@ -28,7 +30,6 @@ object RendererProbe:
   private val cols = 100
   private val rows = 28
   private val fontSize = 13.0
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
   private val waitTimeout: scala.concurrent.duration.Duration = 20.seconds
 
   def main(args: Array[String]): Unit =
@@ -48,7 +49,7 @@ object RendererProbe:
 
   private def run(): Int =
     val reporter = Reporter()
-    val running = Harness.start(cols, rows, pushInterval, HostSession.loginShell)
+    val running = Harness.start(cols, rows, HostSession.loginShell)
     var stage: Option[Stage] = None
     try
       val metrics = onFx(TerminalMetrics.monospaced(fontSize))
@@ -82,9 +83,13 @@ object RendererProbe:
       }
       paintChecks(view, scene, layout, reporter)
       damageChecks(view, scene, layout, reporter)
+      pasteChecks(view, reporter)
+      preeditChecks(view, reporter)
       selectionChecks(view, reporter)
       wideChecks(view, scene, layout, reporter)
       resizeChecks(view, stage.get, layout, reporter)
+      fontSizeChecks(view, reporter)
+      findHighlightChecks(reporter)
       scrollbackChecks(view, reporter, layout)(using stage)
       focusChecks(view, scene, layout, reporter)
       captureChecks(view, scene, reporter)
@@ -111,14 +116,18 @@ object RendererProbe:
   /** The prompt, its colours, and the pixels that back them. */
   private def paintChecks(view: TerminalPane, scene: Scene, layout: Layout, reporter: Reporter): Unit =
     val report = reporter.report
-    val prompted = poll(waitTimeout)(onFx(view.screen).exists(model => rowsOf(model).exists(_.contains("»"))))
+    // The prompt glyph depends on the user's shell theme: this probe runs on a real login shell, not a fixture. What it can assert is that
+    // text arrived and that a glyph is painted in the colour the frame resolved for it.
+    val prompted = poll(waitTimeout)(onFx(view.screen).exists(model => rowsOf(model).exists(_.trim.nonEmpty)))
     report("the host's prompt is painted", prompted, onFx(view.screen).map(model => rowsOf(model).mkString(" / ")).getOrElse("no model"))
 
     still(view)
     val (frame, image) = shoot(view, scene)
     report(
       "the frame carries text cells and the cursor",
-      frame.exists(f => f.rows.exists(_.cells.exists(_.text == "»")) && f.cursor.visible),
+      frame.exists(f =>
+        f.rows.exists(_.cells.exists(cell => cell.text.trim.nonEmpty && cell.width != CellWidth.Continuation)) && f.cursor.visible
+      ),
       frame.map(f => s"${f.size}, cursor ${f.cursor}").getOrElse("no frame")
     )
     val background = backgroundPixelAt(image, layout, cols - 1, rows - 1)
@@ -127,12 +136,17 @@ object RendererProbe:
       closeTo(background, Rgb(13, 17, 23), tolerance = 6),
       s"pixel ${show(background)}"
     )
-    val promptCell = frame.flatMap(f => findCell(f, "»"))
+    val promptCell = frame.flatMap(paintedGlyph)
+    val promptColour = for
+      f <- frame
+      (_, _, cell) <- promptCell
+    yield TerminalStyle.default.foregroundRgb(cell, f.theme)
     report(
       "a painted glyph uses the terminal's foreground",
-      promptCell.exists { case (_, _, cell) => cell.foreground.forall(colour => colour.red > 100) } &&
-        promptCell.exists { case (col, row, _) => containsColour(image, layout, col, row, Rgb(122, 162, 247), tolerance = 90) },
-      promptCell.map { case (col, row, cell) => s"cell ($col,$row) ${cell.foreground}" }.getOrElse("no » cell")
+      promptCell.exists { case (col, row, _) =>
+        promptColour.exists(colour => containsColour(image, layout, col, row, colour, tolerance = 90))
+      },
+      promptCell.map { case (col, row, cell) => s"cell ($col,$row) '${cell.text}' ${cell.foreground}" }.getOrElse("no glyph")
     )
 
     // A command with colours, so the checks see a foreground, a background and an inverse cell. The checks look for the *output* cells by their
@@ -205,6 +219,126 @@ object RendererProbe:
       s"cursor ${cursor}, $painted of ${cursorCells(layout)} pixels in the cell"
     )
 
+  /** A real shell reading raw bytes: the paste chord must send one bracketed sequence, not the clipboard as commands. */
+  private def pasteChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    val pasted = "one\ntwo"
+    val wrapped = s"\u001b[200~$pasted\u001b[201~"
+    val bytes = wrapped.getBytes(StandardCharsets.UTF_8)
+    val expectedHex = bytes.map(byte => f"${byte & 0xff}%02x").mkString
+    val saved = onFx(Option(Clipboard.getSystemClipboard().getString))
+    try
+      onFx {
+        val content = ClipboardContent()
+        content.putString(pasted)
+        val _ = Clipboard.getSystemClipboard().setContent(content)
+      }
+      onFx(
+        view.typeText(
+          s"printf '\\033[?2004h'; stty raw -echo; printf 'PASTE_%s\\n' READY; " +
+            s"dd bs=1 count=${bytes.length} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+            "printf '\\nPASTE_%s\\n' DONE; printf '\\033[?2004l'; stty sane\n"
+        )
+      )
+      val ready = poll(waitTimeout)(
+        onFx(view.frame).exists(frame => frame.modes.bracketedPaste && normalized(frame).contains("PASTE_READY"))
+      )
+      if ready then
+        onFx(
+          Event.fireEvent(
+            view,
+            new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.V, true, true, false, false)
+          )
+        )
+      val done = ready && poll(waitTimeout)(onFx(view.frame).exists(frame => normalized(frame).contains("PASTE_DONE")))
+      val received = onFx(view.frame).map(normalized).getOrElse("")
+      report(
+        "a multiline paste in bracketed-paste mode is one bracketed sequence",
+        done && received.contains(expectedHex),
+        s"bracketed mode $ready, expected $expectedHex, screen ${received.takeRight(100)}"
+      )
+    finally
+      onFx {
+        val content = ClipboardContent()
+        saved.foreach(value => content.putString(value))
+        val _ = Clipboard.getSystemClipboard().setContent(content)
+      }
+
+  /** The composition overlay is drawn over the grid by the canvas and never changes the model. */
+  private def preeditChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    onFx(view.screen) match
+      case None        => report("IME preedit paints over the cursor cell without changing the frame", false, "no model")
+      case Some(model) =>
+        val (plain, composed, frameUnchanged) = onFx {
+          val frameBefore = model.frame
+          val canvas = TerminalCanvas(TerminalMetrics.monospaced(fontSize), TerminalStyle.default)
+          canvas.show(model, None)
+          canvas.setBlinking(false)
+          canvas.showFocus(true)
+          val before = imageOf(canvas)
+          canvas.setPreedit(Some(Preedit("日本", 0)))
+          (before, imageOf(canvas), model.frame == frameBefore)
+        }
+        val changed = differingPixels(plain, composed)
+        report(
+          "IME preedit paints over the cursor cell without changing the frame",
+          changed > 0 && frameUnchanged,
+          s"$changed pixels in the composition, frame unchanged $frameUnchanged"
+        )
+
+  /** A real host round-trip: new metrics request a new grid, and reset restores the default. */
+  private def fontSizeChecks(view: TerminalPane, reporter: Reporter): Unit =
+    val report = reporter.report
+    val before = onFx((view.fontMetrics.font.getSize, view.frame.map(_.size)))
+    onFx(view.setFontSize(16.0))
+    val grew = poll(waitTimeout) {
+      onFx(view.fontMetrics.font.getSize) == 16.0 && onFx(view.frame.map(_.size)) != before._2
+    }
+    report(
+      "a font change asks the host for a new grid",
+      grew,
+      s"size ${before._1} -> ${onFx(view.fontMetrics.font.getSize)}, grid ${before._2} -> ${onFx(view.frame.map(_.size))}"
+    )
+    onFx(view.setFontSize(13.0))
+    val reset = poll(waitTimeout) {
+      onFx(view.fontMetrics.font.getSize == 13.0 && view.frame.map(_.size).contains(view.contentGrid))
+    }
+    report(
+      "and resetting the font restores the default grid",
+      reset,
+      s"size ${onFx(view.fontMetrics.font.getSize)}, grid ${onFx(view.frame.map(_.size))}"
+    )
+
+  /** A match is painted over its cells; this is the painter half of the search, checked without the real shell. */
+  private def findHighlightChecks(reporter: Reporter): Unit =
+    val report = reporter.report
+    val (plain, highlighted) = onFx {
+      val cells = "alpha beta".map(character => Cell(character.toString, CellWidth.Narrow, None, None, false, false, false, false))
+      val frame = Frame(
+        id = SessionId("find-highlight"),
+        size = TermSize(cells.size, 1),
+        rows = Vector(Row(cells.toVector)),
+        cursor = Cursor(0, 0, None, blinking = false, visible = true),
+        modes = Modes(alternateScreen = false, MouseMode.Off, MouseFormat.X10, bracketedPaste = false, title = ""),
+        historyRows = 0,
+        theme = TerminalTheme(Rgb(230, 237, 243), Rgb(13, 17, 23))
+      )
+      val model = ScreenModel(frame, Vector.empty, scrollOffset = 0, newOutput = false)
+      val matches = TerminalSearch.search(model, "alpha")
+      val canvas = TerminalCanvas(TerminalMetrics.monospaced(fontSize), TerminalStyle.default)
+      canvas.show(model, None)
+      canvas.setBlinking(false)
+      val before = imageOf(canvas)
+      canvas.setFind(matches, Some(0))
+      (before, imageOf(canvas))
+    }
+    report(
+      "a find match is painted over its cells",
+      differingPixels(plain, highlighted) > 0,
+      s"${differingPixels(plain, highlighted)} pixels in the highlighted match"
+    )
+
   /** Selection over the visible cells, and the text a copy would put on the clipboard. */
   private def selectionChecks(view: TerminalPane, reporter: Reporter): Unit =
     val report = reporter.report
@@ -239,6 +373,58 @@ object RendererProbe:
       "scrolling back shows history above the grid",
       scrolled && shown.exists(row => row.trim.nonEmpty && !live.contains(row)),
       s"${shown.count(_.trim.nonEmpty)} non-empty rows, ${shown.count(row => !live.contains(row))} of them from history"
+    )
+
+    // A wheel is many small scrollBy calls, not one jump: the same path must reach the oldest history, not stop at a partial page.
+    val beforeWheel = onFx(view.screen).map(_.maxScroll).getOrElse(0)
+    onFx {
+      val event = new ScrollEvent(
+        ScrollEvent.SCROLL,
+        0,
+        2,
+        0,
+        2,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        0,
+        3,
+        0,
+        3,
+        ScrollEvent.HorizontalTextScrollUnits.NONE,
+        0,
+        ScrollEvent.VerticalTextScrollUnits.NONE,
+        0,
+        0,
+        null
+      )
+      (1 to 80).foreach { _ =>
+        Event.fireEvent(view, event.copyFor(view, view))
+        Thread.sleep(10)
+      }
+    }
+    val wheelTop = poll(waitTimeout)(
+      onFx(view.screen).exists(model => model.maxScroll > 0 && model.scrollOffset == model.maxScroll && model.missingHistory == 0)
+    )
+    report(
+      "wheel scrolling reaches the oldest history",
+      wheelTop,
+      onFx(view.screen).map(model => s"offset ${model.scrollOffset}/${model.maxScroll}, missing ${model.missingHistory}").getOrElse("")
+    )
+    onFx(view.scrollTo(math.min(20, beforeWheel)))
+
+    // Output while the reader is scrolled back moves the anchor with the history. The view has to ask for the rows the new offset needs,
+    // not leave blanks above the viewport until the next wheel event.
+    val beforeOutput = onFx(view.screen).map(_.scrollOffset).getOrElse(0)
+    onFx(view.typeText("seq 201 260\r"))
+    val followed = poll(waitTimeout)(onFx(view.screen).exists(model => model.scrollOffset > beforeOutput && model.missingHistory == 0))
+    report(
+      "output while scrolled back fetches the new history",
+      followed,
+      onFx(view.screen).map(model => s"offset $beforeOutput -> ${model.scrollOffset}, missing ${model.missingHistory}").getOrElse("")
     )
 
     onFx(view.scrollTo(0))
@@ -383,6 +569,30 @@ object RendererProbe:
       s"hollow $hollow of ${cursorCells(layout)}, filled $solid"
     )
 
+    // A scrolled-back viewport shows history, so the live cursor has no cell there to mark.
+    val scrolledCursor = onFx {
+      val frame = Frame(
+        id = SessionId("scrolled"),
+        size = TermSize(4, 2),
+        rows = Vector.fill(2)(Row(Vector.empty)),
+        cursor = Cursor(0, 0, None, blinking = false, visible = true),
+        modes = Modes(alternateScreen = false, MouseMode.Off, MouseFormat.X10, bracketedPaste = false, title = ""),
+        historyRows = 2,
+        theme = TerminalTheme(Rgb(230, 237, 243), Rgb(13, 17, 23))
+      )
+      val canvas = TerminalCanvas(TerminalMetrics.monospaced(fontSize), TerminalStyle.default)
+      canvas.show(ScreenModel(frame, Vector.empty, scrollOffset = 1, newOutput = false), None)
+      canvas.setBlinking(false)
+      canvas.showFocus(true)
+      val centre = pixelAt(imageOf(canvas), layout, 0, 0)
+      closeTo(centre, frame.theme.background, tolerance = 2)
+    }
+    report(
+      "the cursor is not painted over scrollback",
+      scrolledCursor,
+      s"cell (0,0) matches the background: $scrolledCursor"
+    )
+
     // Blinking on, then pinned off: the frame keeps asking for blinking on every damage, and the override has to win over it, or a capture
     // after any output is a coin flip.
     onFx(view.setCursorBlinking(true))
@@ -466,6 +676,9 @@ object RendererProbe:
 
   private def lines(frame: corvi.contract.Frame): Vector[String] = frame.rows.map(row => row.cells.map(_.text).mkString.trim)
 
+  private def normalized(frame: corvi.contract.Frame): String =
+    frame.rows.map(row => row.cells.map(_.text).mkString).mkString.filterNot(_.isWhitespace)
+
   private def rowsOf(model: ScreenModel): Vector[String] = (0 until model.rows).map(model.rowText).toVector
 
   /** The login shells the machine is running, as `pgrep` sees them. The pattern comes from `$SHELL`, so on a machine whose shell is not zsh
@@ -486,15 +699,15 @@ object RendererProbe:
       }
       .nextOption()
 
-  private def findCell(frame: corvi.contract.Frame, needle: String): Option[(Int, Int, Cell)] =
+  /** The last non-space glyph, scanning from the bottom: where the shell's prompt or newest output is. */
+  private def paintedGlyph(frame: corvi.contract.Frame): Option[(Int, Int, Cell)] =
     frame.rows.zipWithIndex.reverseIterator
-      .flatMap { case (row, index) => Option.when(row.cells.map(_.text).mkString.contains(needle))(row -> index) }
-      .nextOption()
       .flatMap { case (row, index) =>
-        val text = row.cells.map(_.text).mkString
-        val start = text.indexOf(needle)
-        row.cells.lift(start).map(cell => (start, index, cell))
+        row.cells.zipWithIndex.collectFirst {
+          case (cell, col) if cell.text.trim.nonEmpty && cell.width != CellWidth.Continuation => (col, index, cell)
+        }
       }
+      .nextOption()
 
   private def onFx[A](action: => A): A =
     if Platform.isFxApplicationThread then action
@@ -601,10 +814,12 @@ object RendererProbe:
     for x <- 0 until width; y <- 0 until height do buffered.setRGB(x, y, pixels.getArgb(x, y))
     buffered
 
-  /** Waits until the last non-empty row is the prompt, which is the only state in which a typed command is a command. */
+  /** Waits until the shell has text on screen again. The prompt glyph is the user's theme's business, so the check does not name one; the
+    * caller types its command twice because a repaint can swallow the first one.
+    */
   private def waitForPrompt(view: TerminalPane): Boolean =
     poll(waitTimeout) {
-      onFx(view.frame).exists(f => lines(f).filter(_.nonEmpty).lastOption.exists(_.contains("»")))
+      onFx(view.frame).exists(f => lines(f).exists(_.nonEmpty))
     }
 
   /** How many pixels of the cursor's cell are the cursor's colour, which tells a filled block from an outline. */

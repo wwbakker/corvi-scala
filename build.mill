@@ -15,6 +15,12 @@ val javafxClassifier: String =
 
 val javafxVersion: String = "26"
 
+/** The production window asks JavaFX for hardware rendering first, falling back to software when the display server cannot create a
+  * context. A full-screen canvas is expensive to paint in software, so the fallback is for machines without a working GPU path, not the
+  * default on every Linux host. The TestFX suite still forces software rendering: it must not depend on a GPU.
+  */
+val linuxRenderingOrder: Boolean = sys.props("os.name").toLowerCase.contains("linux")
+
 /** Mill parses one exclusion per `;exclude=` segment; a comma-separated list is silently read as a single bogus exclusion, so each one
   * needs its own segment.
   */
@@ -236,7 +242,7 @@ object app extends ScalaModule:
   def forkArgs = Seq(
     "-Dkyo.scheduler.virtualizeWorkers=true",
     "--add-opens=java.base/java.lang=ALL-UNNAMED"
-  )
+  ) ++ Option.when(linuxRenderingOrder)("-Dprism.order=es2,sw")
 
   /** The window's tests: the TestFX suite that drives the real daemon-backed window, plus the probes and harnesses that used to live in
     * this module. TestFX and JUnit appear here and nowhere else — the `app` module itself has no test dependency.
@@ -249,13 +255,17 @@ object app extends ScalaModule:
         mvn"org.testfx:testfx-junit5:4.0.18"
       )
     }
-    def forkArgs = fxTestForkArgs
+    def forkArgs = fxTestForkArgs ++ Option.when(sys.env.get("CORVI_PAGING_HW").contains("1")) {
+      // The paging profile must measure the production hardware path; ordinary test runs keep software rendering.
+      "-Dprism.order=es2,sw"
+    }
     /** A socket of this run's own. It lives in `/tmp` because a Unix domain socket path is limited to ~104 bytes on macOS, and the
-      * build's own test directory is longer than that; the name is derived from the task so two checkouts do not share a socket.
+      * build's own test directory is longer than that; the name is derived from the task so two checkouts do not share a socket. The paging
+      * profile supplies its own private socket through `CORVI_PAGING_HOST_SOCKET`.
       */
     def forkEnv = Task {
       val root = os.Path("/tmp") / s"corvi-ui-test-${java.lang.Integer.toHexString(Task.dest.toString.hashCode)}"
-      Map("CORVI_HOST_SOCKET" -> (root / "host.sock").toString)
+      Map("CORVI_HOST_SOCKET" -> sys.env.getOrElse("CORVI_PAGING_HOST_SOCKET", (root / "host.sock").toString))
     }
 
 /** The Corvi shell: sidebar, tab strip, Overview and the terminal area, over plain interfaces from `contract`. It depends on nothing of ours

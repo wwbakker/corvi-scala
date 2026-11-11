@@ -1,5 +1,6 @@
 package corvi.app
 
+import corvi.host.HostBuild
 import corvi.protocol.*
 import java.io.File
 import java.nio.file.{Files, Path, Paths}
@@ -23,6 +24,9 @@ object HostConnection:
   /** How long a connect-to-test may take before the socket is treated as nobody's. */
   private val pingTimeout: scala.concurrent.duration.Duration = 500.millis
 
+  /** How long an older daemon gets to stop before a replacement is started without it. */
+  private val stopTimeout: scala.concurrent.duration.Duration = 10.seconds
+
   /** Connects, starting the daemon first if nothing answers, and says hello with the token from the file beside the socket.
     *
     * The sink is made here, where the routes are wired to it, and leaves together with the service: a caller cannot pair a client with a
@@ -38,8 +42,63 @@ object HostConnection:
         case Result.Success(_)     => Sync.defer(())
         case Result.Failure(error) => Abort.fail(HostUnavailable(error.toString))
         case Result.Panic(error)   => Abort.fail(HostUnavailable(error.toString))
-      client <- connect(paths, token)
+      client <- connectCurrent(paths, token)
     yield client
+
+  /** Connects, and replaces a daemon left over from another build.
+    *
+    * A daemon is meant to outlive the UI, but not the code that speaks to it. After a host change the old process would answer every
+    * `session.mouse` (or any other new route) with method-not-found forever, so the UI stops it and starts the daemon from its own
+    * classpath. The old daemon's shells end with it: an updated host is a host restart, not an in-place upgrade.
+    */
+  private def connectCurrent(paths: HostPaths, token: String)(using
+      Frame
+  ): Client < (Async & Scope & Abort[TerminalError | Closed]) =
+    for
+      first <- connect(paths, token)
+      stale <- needsRestart(first)
+      client <-
+        if stale then
+          for
+            _ <- Sync.defer(
+              java.lang.System.err.println("corvi ui: the running host is from another build; restarting it")
+            )
+            _ <- stopAndWait(paths, first)
+            _ <- Sync.defer(start(paths))
+            _ <- Sync.defer(awaitSocket(paths.socket))
+            next <- connect(paths, token)
+          yield next
+        else Sync.defer(first)
+    yield client
+
+  /** A host that predates `host.identity` is from an older build too; that is the method-not-found case the old host answers with. */
+  private def needsRestart(client: Client)(using Frame): Boolean < (Async & Abort[TerminalError | Closed]) =
+    for
+      outcome <- Abort.run[TerminalError | Closed](client.service.identity)
+      stale <- outcome match
+        case Result.Success(identity)                        => Sync.defer(identity.build != HostBuild.current)
+        case Result.Failure(error) if isUnknownMethod(error) => Sync.defer(true)
+        case Result.Failure(error)                           => Abort.fail(error)
+        case Result.Panic(error)                             => Abort.fail(RemoteError(-32603, error.toString))
+    yield stale
+
+  private def isUnknownMethod(error: TerminalError | Closed): Boolean =
+    error match
+      case RemoteError(code, label) => code == -32601 || label.contains("Method not found")
+      case _                        => false
+
+  /** Stops the old daemon and waits until its pid and socket are gone, so the replacement can take the same path. */
+  private def stopAndWait(paths: HostPaths, client: Client)(using Frame): Unit < Async =
+    for
+      // `host.stop` closes the connection on its way out, so `Closed` is the success path, not a failure to report.
+      _ <- Abort.run[TerminalError | Closed](client.service.stop)
+      _ <- Sync.defer(awaitStopped(paths))
+    yield ()
+
+  private def awaitStopped(paths: HostPaths): Unit =
+    val deadline = java.lang.System.nanoTime() + stopTimeout.toNanos
+    while hostRunning(paths) && java.lang.System.nanoTime() < deadline do Thread.sleep(20)
+    if hostRunning(paths) then throw new IllegalStateException(s"the old host did not stop within $stopTimeout")
 
   private def connect(paths: HostPaths, token: String)(using
       Frame
@@ -56,13 +115,20 @@ object HostConnection:
       handler <- JsonRpcHandler.init(transport, ClientRoutes.routes(sink)*)
       service <- Sync.defer(TerminalClient(handler))
       _ <- service.hello(token)
-    yield Client(service, sink)
+      client = Client(service, sink)
+      // The socket's reader or a failed write releases `closed`; surface that once, even when no command is in flight.
+      _ <- Fiber.init(closed.await.andThen(Sync.defer(client.signalConnectionLost())))
+    yield client
 
   private def connectOrStart(paths: HostPaths): Unit =
     if answers(paths.socket) then ()
     else
       start(paths)
       awaitSocket(paths.socket)
+
+  /** Whether a daemon still owns the path, by answering or by its marker naming a live process. */
+  private def hostRunning(paths: HostPaths): Boolean =
+    answers(paths.socket) || paths.owner().exists(pid => ProcessHandle.of(pid).isPresent)
 
   /** Whether something is listening: a non-blocking connect that completes is a daemon, one that fails is a socket nobody owns.
     *
@@ -79,6 +145,9 @@ object HostConnection:
     val builder = java.lang
       .ProcessBuilder(
         javaBinary,
+        // A short, stable marker at the front of the command line: the test harness cannot see the main class at the end of the classpath,
+        // because Java's ProcessHandle truncates the command line it reports.
+        "-Dcorvi.host.daemon=true",
         "-Dkyo.scheduler.virtualizeWorkers=true",
         "--add-opens=java.base/java.lang=ALL-UNNAMED",
         "-cp",

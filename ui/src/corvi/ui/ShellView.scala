@@ -29,6 +29,8 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
   private val mounted: ObjectProperty[Mounted] = ObjectProperty(Mounted(Map.empty, Map.empty))
   private val chords: ObjectProperty[Chords.State] = ObjectProperty(Chords.initial)
   private val mac: Boolean = Chords.isMacPlatform
+  private var fontSize: Double = factory.fontSize
+  private var lastSelected: Option[WindowId] = None
 
   private val workspace: VBox = new VBox:
     val _ = styleClass ++= Seq("workspace")
@@ -53,10 +55,15 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
 
   def current: ShellState = state.value
 
+  /** The window's current terminal font preference, for carrying it across a reconnect. */
+  private[corvi] def currentFontSize: Double = fontSize
+
   /** A session the host already had: a reattach after a UI restart, or the first window of a fresh UI. */
   def open(info: SessionInfo): Unit =
     val label = s"${info.id.value}"
-    val (next, id) = current.opened(label, info.id)
+    val (opened, id) = current.opened(label, info.id)
+    // A session that ended while no UI was attached is still listed so its final screen can come back; its tab must come back ended too.
+    val next = info.ending.fold(opened)(ended => opened.ended(id, ended))
     state.value = next
     val view = factory.open(
       info,
@@ -101,6 +108,18 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
           case Chords.Outcome.CloseSelected =>
             event.consume()
             selectedWindow.foreach(closeWindow)
+          case Chords.Outcome.Find =>
+            event.consume()
+            selectedWindow.flatMap(mounted.value.views.get).foreach(_.openFind())
+          case Chords.Outcome.IncreaseFont =>
+            event.consume()
+            applyFontSize(TerminalFontSize.increased(fontSize))
+          case Chords.Outcome.DecreaseFont =>
+            event.consume()
+            applyFontSize(TerminalFontSize.decreased(fontSize))
+          case Chords.Outcome.ResetFont =>
+            event.consume()
+            applyFontSize(TerminalFontSize.reset)
           case Chords.Outcome.Select(index) =>
             event.consume()
             current.windows.lift(index).foreach(window => select(Selection.Window(window.id)))
@@ -146,6 +165,13 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
 
   private def activity(id: WindowId): Unit = applied(current.activity(id))
 
+  /** A font change is one preference for the whole window: the factory uses it for future views, and every mounted view re-measures. */
+  private def applyFontSize(size: Double): Unit =
+    if size != fontSize then
+      fontSize = size
+      factory.setFontSize(size)
+      mounted.value.views.values.foreach(_.setFontSize(size))
+
   /** The shell exited: the tab says so and how, and stops asking for attention. */
   private def acceptedEnded(id: WindowId, ended: Ended): Unit = applied(current.ended(id, ended))
 
@@ -187,6 +213,13 @@ private[corvi] final class ShellView(factory: TerminalViewFactory[JfxNode]) exte
     strip.show(current.selection, current.windows)
     val selection = current.selection
     val views = mounted.value.views
+    val selectedId = selection match
+      case Selection.Window(id) => Some(id)
+      case Selection.Overview   => None
+    // A find bar belongs to the tab that opened it; leaving that tab drops its query and highlights.
+    if lastSelected != selectedId then
+      lastSelected.foreach(id => views.get(id).foreach(_.clearFind()))
+      lastSelected = selectedId
     selection match
       case Selection.Overview =>
         overview.setVisible(true)

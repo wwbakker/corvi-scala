@@ -43,9 +43,9 @@ The **host interprets the terminal**; the frontend only renders it.
 ## Protocol (JSON-RPC over a Unix domain socket, `kyo-jsonrpc`)
 
 - `session.attach(id, cols, rows)` → `Snapshot`: styled cells for the visible grid, cursor (pos,
-  shape, blink, visible), modes (alternate screen, mouse mode/format, bracketed paste, title),
-  history row count. The session's theme (default foreground/background) travels in
-  `SessionInfo`, not in every frame.
+  shape, blink, visible), modes (alternate screen, mouse mode/format, bracketed paste, title,
+  1004 focus reporting), history row count. The session's theme (default foreground/background)
+  travels in `SessionInfo`, not in every frame.
 - `session.damage(id, damage)` — a frame delta: `rows` (index → cells), and `size`, `cursor`,
   `modes`, `historyRows` as `Option`s where `None` means unchanged. `Damage.applyTo(before)`
   is the host's own definition of what the delta means, so a client that applies it holds the
@@ -53,8 +53,12 @@ The **host interprets the terminal**; the frontend only renders it.
   the row indexes mean a different grid.
 - `session.history(id, from, count)` — scrollback pages, newest first, `from` counting back
   from the most recent.
-- `session.key(id, keyCode, modifiers, text)` / `session.mouse(...)` / `session.resize(id, cols, rows)`
-  — the host owns key/mouse encoding (`TerminalKeyEncoder`) because it knows the terminal modes.
+- `session.mouse(id, input)` — one pointer event in terminal cells. The host owns the encoding because it knows the mouse mode and format
+  the program enabled (`1000`/`1001`/`1002`/`1003` and `1005`/`1006`/`1015`/X10).
+- `session.key(id, input)` — one semantic key (`TerminalKey` + `KeyModifiers`). The host owns the encoding because it knows DECCKM, the
+  application-arrow mode, and xterm's modifier rules. `session.resize(id, cols, rows)` is applied by the host.
+- `session.focus(id, focused)` — a window focus transition. The host writes `ESC[I`/`ESC[O` only while the program enabled `1004`;
+  every other mode ignores it.
 - `session.ended(id, ended)` — once per attached client: `closed` says who ended it, `code` is
   advisory, `reason` carries a reader failure. `sessions.list`, `session.create`, `session.close`.
 - Base64 cell payloads first; a compact binary framing can replace them later without changing
@@ -66,10 +70,14 @@ The **host interprets the terminal**; the frontend only renders it.
 
 - **Routes**: names in `Methods`, params in `Messages`, and the client's two notification routes in
   `ClientRoutes` — all in `protocol`. The host's answering routes are `HostRoutes` in `host`,
-  because they need the live sessions. `session.text`/`session.resize` are requests, not
-  notifications: a client wants to know when the host no longer has the session. `text` is
-  paste-only for now; `session.key`/`session.mouse` arrive with the renderer, which owns the event
-  model, and the host will encode them because it knows the modes.
+  because they need the live sessions. `session.text`/`session.mouse`/`session.key`/`session.focus`/
+  `session.resize` are requests, not notifications: a client wants to know when the host no longer has
+  the session. `text` is
+  paste-only and carries printable input; mouse input carries cells and buttons and the host encodes
+  it in the mode and format the program enabled. Focus input is a separate route because 1004 is
+  independent of the mouse modes. Key input carries a semantic `TerminalKey` and its modifiers; the
+  host's `KeyEncoder` maps it to JediTermFX's encoder, which supplies DECCKM, the `CSI 1;N` suffixes
+  and Shift+Tab, with small fallbacks for Escape and plain Tab.
 - **`protocol` depends on `contract` and `kyo-jsonrpc` only**; `host` depends on `protocol`. A UI
   build therefore takes the client half without pty4j, jeditermfx or the host's JVM flags. For the
   same reason the protocol probe lives in `host` (`corvi.host.ProtocolProbe`): it needs real shells.
@@ -97,13 +105,11 @@ The **host interprets the terminal**; the frontend only renders it.
   self-healing; it is not needed while attach only happens at start and on reconnect, which is a new
   client.) Client ids are unique per connection (`client-1`, `client-2`, …) and a duplicate `bind` is
   refused rather than replacing the other peer.
-- **Pushes**: one loop per session samples every `pushInterval` (an `init` parameter; the probes run
-  at 200 ms, the host at 16 ms) and sends a delta only when one is non-empty, and only to clients
-  that attached — a session nobody is watching is not even sampled. Sampling *is* the coalescer:
-  everything since the previous tick leaves as one delta, and an unchanged frame costs nothing on
-  the wire. Waking the loop from the reader (a `Channel`/`Signal` per session, once the host is a
-  `KyoApp`) is a later refinement; the current loops use `Fiber.initUnscoped` because a route handler
-  has no scope.
+- **Pushes**: one loop per session waits on that session's wake-up queue and sends a delta only to
+  clients that attached. The emulator, a resize and the process's exit wake the queue; capacity one
+  coalesces a burst into the latest frame, and an idle session blocks instead of waking every tick.
+  The loop still uses `Fiber.initUnscoped` because a route handler has no scope. The host session
+  also keeps a generation counter for the probes, which proves that an idle screen applies no output.
 - **Client** (`TerminalService`): UI-free, no `kyo-jsonrpc` in its signatures, with a `FrameSink` for
   the two pushes. `TerminalPeers.inMemory` wires a host peer and a client peer over
   `JsonRpcTransport.inMemory`; the Unix-socket phase replaces only the transport.
@@ -128,12 +134,13 @@ as applying it once. Two rules follow, and both are load-bearing:
 `code` (advisory — a host-initiated close reports whatever the PTY made of the signal) and `reason`
 for a reader failure. The session then **stays listed with `running = false`**, so a tab can show
 its final screen and the client can still read history; `session.close` is what removes it, and
-`session.text`/`session.resize` on it fail with the typed `SessionEnded`. Reaping ended sessions on
+`session.text`/`session.resize` on it fail with the typed `SessionEnded`. Its `SessionInfo` also
+carries the `Ended` value, so a client that lists the sessions later — a UI restart, say — can show
+the same exit code or failure reason it would have received in the push. Reaping ended sessions on
 a timer is a host-phase decision, not this one.
 
-Still planned, not built: `Channel`/`Signal` between the reader and the push loops, `session.key`
-and `session.mouse`, a supervisor fiber per host with its own scope, and the ended-session reap
-policy.
+Still planned, not built: `Channel`/`Signal` between the reader and the push loops, `session.key`,
+a supervisor fiber per host with its own scope, and the ended-session reap policy.
 
 ### Daemon limits
 
@@ -148,8 +155,9 @@ policy.
   `UnsupportedAddressTypeException`, which reads exactly like "nobody is listening". The symptom is a second daemon per
   UI start and a UI that then waits for a socket that already exists; `HostDaemonProbe` checks both the live and the dead
   answer.
-- A UI whose host dies is not reconnected automatically: `HostConnection.ensure` starts a new daemon when it runs, and `ShellApp` does
-  not re-run it on `Closed` (the daemon probe covers a replacement answering, the window does not).
+- A UI whose host dies is reconnected automatically: the client reports a lost socket, `AppWindow` disposes the old shell and client,
+  retries `HostConnection.ensure` with bounded backoff, and reattaches the sessions the replacement lists. An empty replacement stays on
+  the shell's Overview.
 - `host.log` is truncated on every spawn, so it holds one launch's output, not a history.
 - Spawn detachment is `java -cp` with redirected stdio and no handle kept; it does **not** call `setsid`, so a launcher that kills its whole
   process group takes the daemon with it. A packaged app needs its own launcher.
@@ -157,16 +165,22 @@ policy.
 
 ### Renderer limits
 
-- Font metrics are measured once, from `Text("M")`/`Text("Mg")`: no re-measure on a DPI or font change, and a half-pixel cell width is
-  rounded up, which makes the grid slightly wider than needed.
+- Font metrics are measured from `Text("M")`/`Text("Mg")`; a size change re-measures on the FX thread and replaces the canvas. A
+  half-pixel cell width is rounded up, which makes the grid slightly wider than needed.
 - A `Wide` cell is one glyph drawn at the cell's left edge with its `Continuation` skipped: right for a monospace font whose CJK glyphs are
   exactly two cells wide, wrong for one where they are not. No fallback font, per-script shaping or emoji presentation.
 - History is refetched wholesale (`from = 1`, `count = offset + rows`) rather than paged incrementally, copied text loses wrapping and has
   no line join, and a resize while scrolled back does not reflow history.
-- Input is paste-and-edit only (see above); the clipboard write is unchecked because the probe machine is headless, and the probe asserts the
-  copied text rather than the system clipboard.
+- Input is text, named keys and mouse reports (see above); the clipboard write is unchecked because the probe machine is headless, and the
+  probe asserts the copied text rather than the system clipboard.
 - Focus and blink are overridden for captures; neither is asserted against a real window manager, and the blink has no phase relationship
   with the host.
+- IME preedit styling is not implemented: the overlay paints one background/underline for every grapheme, while JavaFX's
+  `InputMethodTextRun` highlights are ignored. `getLocationOffset` returns zero and `cancelLatestCommittedText` is a no-op, so candidate
+  window placement and platform-side cancellation are approximate.
+- Find is literal and client-side: it searches the loaded history plus the live grid, with no regex or future output. History is fetched
+  wholesale on the first query and reused.
+- Font size is a window runtime preference, not a persisted setting.
 
 ## The renderer
 
@@ -178,9 +192,11 @@ they start a real host.
   `ScreenModel` (the live grid or history above it, the scroll offset, the new-output mark, and the copy semantics: wide characters once,
   continuations skipped, trailing blanks trimmed). No JavaFX type appears in any of them, so hit-testing, scrolling and copying are checked
   without a toolkit.
-- **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, glyph (bold/italic via cached fonts, underline
-  as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model and the selection and calls the painter; blinking
-  is a timeline the view switches on when the frame's cursor blinks, and off for captures.
+- **Painter and canvas.** `TerminalPainter` draws background, per-cell background, selection, find highlights, glyph (bold/italic via
+  cached fonts, underline as a hairline), then the cursor and the new-output pill. `TerminalCanvas` holds the model, selection, IME
+  preedit and find highlights and calls the painter; blinking is a timeline the view switches on when the frame's cursor blinks, and off
+  for captures. A `TerminalView` in a background tab applies damage to its model but does not paint: the visible tab is the only one that
+  draws, and selecting a hidden tab repaints its current frame instead of replaying the deltas it missed.
 - **Focus.** A window without the keyboard draws the cursor hollow — stroke only, no fill and no glyph redraw, so the cell keeps its own
   colour: it says where the cursor would be, not that it has focus. Focus is a base flag the view sets from its own `focusedProperty`, with an
   override a harness can drive, because a canvas never takes the keyboard itself.
@@ -190,10 +206,31 @@ they start a real host.
 - **The FX/Kyo boundary.** The client's Kyo runtime gets a thread of its own; the FX thread never enters an effect. FX hands commands (text,
   resize, history) to a blocking queue that one fiber drains, and every result and every push comes back through `Platform.runLater`. That is
   two hops in the whole renderer, and it is why `SessionEvents` can promise the FX thread and `FrameSink` is the only place that hops.
+  Incoming damage is coalesced before that hop: the latest delta waits behind one scheduled `Platform.runLater`, so a slow paint cannot build
+  an unbounded queue of intermediate screens.
 - **Input.** Typed characters go out as `session.text`, and the editing keys — Backspace as `^?`, Enter as `\r`, Tab, Escape — are forwarded
-  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. **This build is
-  paste-and-edit only**: arrows, modified keys and mouse report nothing, because they need the host's mode-dependent encoding and a
-  `session.key`/`session.mouse` route; mouse drag selects locally and wheel scrolls.
+  from `KEY_PRESSED` because `KEY_TYPED` reports Backspace as `\b`, which a macOS `stty erase` does not accept. Arrows, navigation,
+  F1–F12, Shift+Tab and modified keys go through `session.key` as a `TerminalKey`; the host's `KeyEncoder` turns them into the session's
+  current sequences. Plain printable text, including Shift-only characters, stays on the text route. Alt has an application mode:
+  `Compose` keeps Option-composed characters as text, while `Meta`/`Escape` route Alt+printable through `session.key` and let the host
+  prepend the Meta escape; Alt+special keys always use the key route. The printable table follows the US layout for shifted digits and
+  punctuation; keys outside it use the platform's typed character. `CORVI_ALT_MODE` selects it until settings exist, defaulting to
+  `Compose` on macOS and `Escape` elsewhere. Keypad keys are left out: the engine has only keypad cursor constants, which duplicate the
+  arrows, and no keypad digits or Enter. **Paste** is wrapped in `ESC[200~`/`ESC[201~` exactly while the frame's `bracketedPaste` mode is
+  on; the clipboard text itself is untouched. **Mouse reporting** is forwarded when the program enables it: the view maps a click, drag,
+  vertical or horizontal wheel, or back/forward button to a cell and a button, and the host encodes it in the session's current
+  mode/format. Shift/Option-drag forces a local selection; without mouse reporting, drag selects and the wheel scrolls the local history.
+  **Focus reporting** follows the frame's `focusReporting`: a focus change is sent only while `1004` is on. **IME preedit** is a canvas
+  overlay at the cursor; only committed text goes through `session.text`, so the host grid never sees a partial composition. The view
+  implements the minimal `InputMethodRequests` needed for candidate placement.
+- **Find.** `TerminalSearch` is a pure literal search over loaded history plus the live grid. The view's find bar fetches all available
+  history on the first query, scrolls to a selected match, and paints all matches with the current one stronger. Leaving the tab or ending
+  the session clears it.
+- **Font size.** The window owns one runtime size preference. A chord re-measures every mounted view, replaces its canvas while keeping
+  the model, selection and scrollback offset, and asks the host for a grid that fits; the factory uses the new size for later tabs.
+- **Links.** `Cell.link` is a sparse per-cell OSC 8 target. The host stores the URI in a `UriLinkInfo` on the `HyperlinkStyle`, so styles the
+  engine derives after SGR changes keep the target; the renderer underlines the hovered link run and changes the cursor, and `⌘`/`ctrl`-click
+  calls an app-supplied opener after a second scheme check.
 - **Scrollback.** The model holds the host's paged history newest-first and draws the newest `offset` rows above the top of the grid. Scrolling
   past what it has asks the host for more, and the rows still in flight are blank rather than filled with grid rows, so the view keeps its
   shape instead of jumping. Reaching the bottom returns to the live grid. Output that arrives while scrolled back sets the new-output mark and
@@ -233,9 +270,10 @@ through a fake factory and know nothing about where pixels or bytes come from.
   and tooltip), `Ending.Failed(reason)` (the reader died; the tooltip carries the reason) or `Ending.Closed` (a client close — you closed the
   tab — with no extra marker). `closed` wins over everything else: a close's code is the signal the host sent, not the shell's own status.
   Otherwise a reader failure is `Failed` and a code is `Exited`. An ended window stops asking for attention, so it never bells.
-- **Not built: reconnect.** `ShellApp` ensures the host, lists once and attaches; if the daemon goes away the window keeps the last frames it
-  received. The architecture already makes a host's death the shells' death, so this phase records the gap instead of hiding it: restarting
-  the window reattaches to whatever host answers then. A UI restart against a *live* host works — that is the case that was in scope.
+- **Reconnecting.** `Client` raises a one-shot connection-lost signal from the socket monitor or a `Closed` command; `AppWindow` owns the
+  supervisor. Each attempt has its own scope, so its handler, reader and serve fiber are released before the next attempt. It shows the
+  lost-host status, disposes the old views, retries with bounded backoff, and reattaches the replacement's sessions. A replacement with no
+  sessions lands on Overview, not a blank terminal. The build-mismatch restart in `HostConnection` is unchanged and separate.
 - `./mill app.run` starts `ShellApp`, the daemon-backed window; the probes and the snapshot harness live in the same module because
   they start a real host.
 
@@ -276,7 +314,9 @@ connects to it; it does not own it.
   nothing waits for it, nothing destroys it. Then it waits for the socket and says hello. The packaged app will need a launcher of its own;
   `java -cp` is what a Mill-run UI can do.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. A second client can attach to the
-  same host at the same time; damage is pushed per client from that client's own baseline, so neither disturbs the other.
+  same host at the same time; damage is pushed per client from that client's own baseline, so neither disturbs the other. The daemon also
+  answers `host.identity` with a fingerprint of the `host`/`protocol`/`contract` classes; when it differs from the UI's own build, the UI
+  stops the old daemon and starts a new one. That is a deliberate host restart: the old daemon's shells end.
 - Windows (TCP or a named pipe) is out of scope; only the transport seam would change, not the routes or the lifecycle.
 
 ## Modules (Mill)
@@ -354,8 +394,17 @@ The UI is testable with a fake `TerminalViewFactory`; the host and renderer are 
   carries no colour, and it must not re-declare the host's default style.
 - **`MouseMode.Focus` exists** because jeditermfx-core models DECSET 1004 in its `MouseMode` enum
   and calls `terminalMouseModeSet` with it; an unhandled case threw inside an emulator callback
-  and killed the session. Mode 9 (X10) has no case: the engine does not implement it. `Highlight`
-  is DECSET 1001, and `MouseFormat.Utf8` is 1005 — both were mislabelled at first.
+  and killed the session. The emulator's own 1004 handler is a no-op, however, and 1004 is
+  independent of the mouse modes (Pi enables both), so the host tracks `focusReporting` in `Modes`
+  from the input stream and keeps `MouseMode.Focus` only as the engine enum member and encoder
+  name. Mode 9 (X10) has no case: the engine does not implement it. `Highlight` is DECSET 1001, and
+  `MouseFormat.Utf8` is 1005 — both were mislabelled at first.
+- **The 1004 detector is a raw pre-scan.** `FocusTrackingDataStream` watches the input before the
+  emulator, so an `ESC[?1004h` embedded in an OSC/DCS payload can toggle the flag; RIS does not clear
+  it either. The normal DECSET path is what the probe covers.
+- **Bracketed paste is decided from the last frame.** A paste racing a `2004` disable can send the
+  literal `ESC[200~`/`ESC[201~` markers; the program owns the paste, so the renderer does not retry
+  or rewrite it after sending.
 - **Resize is serialised by the buffer's lock, not by the drive loop**: `JediTerminal.resize` runs
   inside `TerminalTextBuffer.modify`, the same lock each parse step takes, so it cannot interleave
   with a half-parsed sequence. Handing it to the loop instead (a pending size applied before the
@@ -368,11 +417,12 @@ The UI is testable with a fake `TerminalViewFactory`; the host and renderer are 
 
 ## Non-goals for now
 
-Host restart survival, remote hosts, find/hyperlinks/IME (renderer follow-ups), Windows transport.
+Host restart survival, remote hosts, URL auto-detection and editor/file-line links, Windows transport.
 
 ## Limits
 
 5,000 rows of scrollback per session (UI cache and host history); base64 damage initially;
 selection/copy local in the renderer; scrollback paged from the host; a resize is applied on the
 caller's thread under the buffer lock (the PTY is resized at once, so a full-screen program
-redraws through SIGWINCH). The UI does not reconnect to a host that dies (see "The shell").
+redraws through SIGWINCH). The UI reconnects to a replacement host with bounded backoff; old shells do not survive the host's death
+(see "The shell").

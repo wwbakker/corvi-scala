@@ -28,5 +28,10 @@ final class ViewSink extends FrameSink:
       targets.get.foreach(view => view.pushDamage(id, damage))
     }
 
+  override def damage(id: SessionId, seq: Long, damage: Damage): Unit < Sync =
+    Sync.defer {
+      targets.get.foreach(view => view.pushDamage(id, seq, damage))
+    }
+
   def ended(id: SessionId, ended: Ended): Unit < Sync =
     Sync.defer(targets.get.foreach(view => view.pushEnded(id, ended)))

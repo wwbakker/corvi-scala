@@ -1,9 +1,9 @@
 package corvi.app
 
 import corvi.contract.*
-import corvi.protocol.{TerminalError, TerminalService}
+import corvi.protocol.{RemoteError, SessionEnded, TerminalError, TerminalService, UnknownSession}
 import corvi.renderer.{SessionCalls, SessionEvents}
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.{CopyOnWriteArrayList, LinkedBlockingQueue}
 import java.util.concurrent.atomic.AtomicBoolean
 import javafx.application.Platform
 import kyo.*
@@ -29,6 +29,21 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
     */
   private val commands: Client.Queue = new Client.Queue
 
+  /** A host from before `session.mouse` existed answers that route with a method-not-found error. That is a whole-client capability, not a
+    * transient session error: one report is enough, and further pointer events must not spam the console.
+    */
+  private val mouseUnavailable: AtomicBoolean = new AtomicBoolean(false)
+
+  /** The same for `session.key`, so an older daemon does not report once per arrow key. */
+  private val keyUnavailable: AtomicBoolean = new AtomicBoolean(false)
+
+  /** The same for `session.focus`, so an older daemon does not report once per focus change. */
+  private val focusUnavailable: AtomicBoolean = new AtomicBoolean(false)
+
+  /** The window's supervisor learns once that the socket has gone, whether the loss surfaced through a command or the reader. */
+  private val connectionLost: AtomicBoolean = new AtomicBoolean(false)
+  private val lostListeners: CopyOnWriteArrayList[() => Unit] = new CopyOnWriteArrayList()
+
   /** A new session at this grid, delivered on the FX thread: `None` when the host refused, and nothing is shown until it arrives. */
   def create(cwd: String, size: TermSize, onCreated: Option[SessionInfo] => Unit): Unit =
     offer(Command.Create(cwd, size, onCreated))
@@ -42,17 +57,40 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
 
   def text(session: SessionId, text: String): Unit = offer(Command.Text(session, text))
 
+  def mouse(session: SessionId, input: MouseInput): Unit =
+    if !mouseUnavailable.get() then offer(Command.Mouse(session, input))
+
+  def key(session: SessionId, input: KeyInput): Unit =
+    if !keyUnavailable.get() then offer(Command.Key(session, input))
+
+  def focus(session: SessionId, focused: Boolean): Unit =
+    if !focusUnavailable.get() then offer(Command.Focus(session, focused))
+
   def resize(session: SessionId, size: TermSize): Unit = offer(Command.Resize(session, size))
 
   def history(session: SessionId, from: Int, count: Int): Unit = offer(Command.History(session, from, count))
 
   def close(session: SessionId): Unit = offer(Command.Close(session, None))
 
+  override def ack(session: SessionId, seq: Long): Unit = offer(Command.Ack(session, seq))
+
   /** Ends the client's runtime. Commands queued before this are served; the close marker ends the loop, and anything offered afterwards is
     * inert. Closing is one atomic step on the queue itself, so no command can slip past a check and be served after the close.
     */
   def stop(): Unit =
     val _ = commands.close()
+
+  /** Registers the one-shot connection-lost callback. Registering after the loss runs it immediately. */
+  private[app] def onConnectionLost(listener: () => Unit): Unit =
+    lostListeners.add(listener)
+    if connectionLost.get() then listener()
+
+  /** Called by the socket's close monitor or by a command that sees `Closed`; the callback runs once. */
+  private[app] def signalConnectionLost(): Unit =
+    if connectionLost.compareAndSet(false, true) then lostListeners.forEach(listener => listener())
+
+  /** For the reconnect lifecycle tests: whether the queue has been closed. */
+  private[app] def isStopped: Boolean = commands.isClosed
 
   private def onFx(action: () => Unit): Unit =
     // The one FX hop: nothing else here knows that JavaFX exists.
@@ -77,8 +115,22 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
             attached(service.attach(id))(target).map(_ => (events.updated(id, target), false))
           case Some(Command.Text(id, text)) =>
             perform(events.get(id), "text")(service.text(id, text)).map(_ => (events, false))
+          case Some(Command.Mouse(_, _)) if mouseUnavailable.get() => Sync.defer((events, false))
+          case Some(Command.Mouse(id, input))                      =>
+            performedCapability(events.get(id), "mouse", mouseUnavailable, unsupportedMouse)(service.mouse(id, input))
+              .map(_ => (events, false))
+          case Some(Command.Key(_, _)) if keyUnavailable.get() => Sync.defer((events, false))
+          case Some(Command.Key(id, input))                    =>
+            performedCapability(events.get(id), "key", keyUnavailable, unsupportedKey)(service.key(id, input))
+              .map(_ => (events, false))
+          case Some(Command.Focus(_, _)) if focusUnavailable.get() => Sync.defer((events, false))
+          case Some(Command.Focus(id, focused))                    =>
+            performedCapability(events.get(id), "focus", focusUnavailable, unsupportedFocus)(service.focus(id, focused))
+              .map(_ => (events, false))
           case Some(Command.Resize(id, size)) =>
             perform(events.get(id), "resize")(service.resize(id, size)).map(_ => (events, false))
+          case Some(Command.Ack(id, seq)) =>
+            perform(None, "ack")(service.ack(id, seq)).map(_ => (events, false))
           case Some(Command.History(id, from, count)) =>
             performed(events.get(id), "history")(service.history(id, from, count))(rows =>
               events.get(id).foreach(target => onFx(() => target.history(rows.toVector)))
@@ -101,6 +153,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
         case Result.Success(info)  => Sync.defer(onFx(() => onCreated(Some(info))))
         case Result.Failure(error) =>
           Sync.defer {
+            if connectionGone(error) then signalConnectionLost()
             report(s"create failed: $error")
             onFx(() => onCreated(None))
           }
@@ -123,6 +176,7 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
         case Result.Success(_)     => Sync.defer(onClosed.foreach(callback => onFx(callback)))
         case Result.Failure(error) =>
           Sync.defer {
+            if connectionGone(error) then signalConnectionLost()
             report(s"close failed: $error")
             onClosed.foreach(callback => onFx(callback))
           }
@@ -140,8 +194,9 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
       outcome <- Abort.run[TerminalError | Closed](operation)
       _ <- outcome match
         case Result.Success(snapshot) => Sync.defer(onFx(() => target.attached(snapshot)))
-        case Result.Failure(error)    => Sync.defer(onFx(() => target.failed(s"attach failed: $error")))
-        case Result.Panic(error)      => Sync.defer(onFx(() => target.failed(s"attach panicked: $error")))
+        case Result.Failure(error)    =>
+          Sync.defer { if connectionGone(error) then signalConnectionLost(); onFx(() => target.failed(s"attach failed: $error")) }
+        case Result.Panic(error) => Sync.defer(onFx(() => target.failed(s"attach panicked: $error")))
     yield ()
 
   /** Runs one call and reports a typed failure to the view it belongs to; the loop never aborts on a session error. */
@@ -150,14 +205,64 @@ final class Client(val service: TerminalService, val sink: ViewSink) extends Ses
   ): Unit < Async =
     performed(events, label)(operation)(_ => ())
 
+  /** A command that raced the session's end is not a failure to print: the tab is already ended and the screen stays usable. */
+  private def sessionGone(error: TerminalError | Closed): Boolean =
+    error match
+      case SessionEnded(_) | UnknownSession(_) => true
+      case _                                   => false
+
+  private def connectionGone(error: TerminalError | Closed): Boolean =
+    error match
+      case _: Closed => true
+      case _         => false
+
+  private val unsupportedMouse: String = "the host does not support mouse reports; restart it to load session.mouse"
+  private val unsupportedKey: String = "the host does not support key input; restart it to load session.key"
+  private val unsupportedFocus: String = "the host does not support focus reports; restart it to load session.focus"
+
+  /** A route the host may predate is reported once when it is missing, not once per event: an old daemon would otherwise print on every
+    * pointer move or arrow key while a TUI is running.
+    */
+  private def performedCapability(
+      events: Option[SessionEvents],
+      label: String,
+      unavailable: AtomicBoolean,
+      unsupported: String
+  )(operation: Unit < (Async & Abort[TerminalError | Closed]))(using Frame): Unit < Async =
+    for
+      outcome <- Abort.run[TerminalError | Closed](operation)
+      _ <- outcome match
+        case Result.Success(_)                                                                       => Sync.defer(())
+        case Result.Failure(RemoteError(_, description)) if description.contains("Method not found") =>
+          Sync.defer {
+            if unavailable.compareAndSet(false, true) then
+              report(unsupported)
+              events.foreach(target => onFx(() => target.failed(unsupported)))
+          }
+        case Result.Failure(error) if connectionGone(error) => Sync.defer(signalConnectionLost())
+        case Result.Failure(error) if sessionGone(error)    => Sync.defer(())
+        case Result.Failure(error)                          =>
+          Sync.defer {
+            report(s"$label failed: $error")
+            events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
+          }
+        case Result.Panic(error) =>
+          Sync.defer {
+            report(s"$label panicked: $error")
+            events.foreach(target => onFx(() => target.failed(s"$label panicked: $error")))
+          }
+    yield ()
+
   private def performed[A](events: Option[SessionEvents], label: String)(
       operation: A < (Async & Abort[TerminalError | Closed])
   )(handle: A => Unit)(using Frame): Unit < Async =
     for
       outcome <- Abort.run[TerminalError | Closed](operation)
       _ <- outcome match
-        case Result.Success(value) => Sync.defer(handle(value))
-        case Result.Failure(error) =>
+        case Result.Success(value)                          => Sync.defer(handle(value))
+        case Result.Failure(error) if connectionGone(error) => Sync.defer(signalConnectionLost())
+        case Result.Failure(error) if sessionGone(error)    => Sync.defer(())
+        case Result.Failure(error)                          =>
           Sync.defer {
             report(s"$label failed: $error")
             events.foreach(target => onFx(() => target.failed(s"$label failed: $error")))
@@ -179,8 +284,12 @@ private[app] object Client:
     case Close(session: SessionId, onClosed: Option[() => Unit])
     case Attach(session: SessionId, events: SessionEvents)
     case Text(session: SessionId, text: String)
+    case Mouse(session: SessionId, input: MouseInput)
+    case Key(session: SessionId, input: KeyInput)
+    case Focus(session: SessionId, focused: Boolean)
     case Resize(session: SessionId, size: TermSize)
     case History(session: SessionId, from: Int, count: Int)
+    case Ack(session: SessionId, seq: Long)
 
   /** The commands FX offers the client's runtime, and the close that ends it.
     *
@@ -203,6 +312,9 @@ private[app] object Client:
       if !alreadyClosed then
         val _ = commands.offer(Maybe.Absent)
       !alreadyClosed
+
+    /** Whether the close marker has been appended. */
+    def isClosed: Boolean = closed.get()
 
     /** Blocks until the next command, or `None` once the queue has been closed. */
     def take(): Option[Command] =

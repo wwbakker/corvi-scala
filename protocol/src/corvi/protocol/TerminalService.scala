@@ -9,9 +9,8 @@ import kyo.Frame
   * Failures are values: the host's typed route errors come back as `TerminalError` (rebuilt from the code and the error's `data`), and
   * `Closed` says the transport went away.
   *
-  * `text` is paste-only for now: it puts the bytes on the shell's input as they are, so Enter has to be sent as `\r` (which is what a
-  * terminal sends) and nothing is translated. Key and mouse events belong here too, but they need the host's encoders and the terminal
-  * modes, so they arrive with the renderer's key handling rather than as a rename later.
+  * `text` is paste-only: it puts the bytes on the shell's input as they are, so Enter has to be sent as `\r` (which is what a terminal
+  * sends) and nothing is translated. Key and mouse events need the host's mode-dependent encoders, so they go through their own routes.
   */
 private[corvi] trait TerminalService:
 
@@ -19,6 +18,9 @@ private[corvi] trait TerminalService:
   def hello(token: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
 
   def status(using Frame): HostStatus < (Async & Abort[TerminalError | Closed])
+
+  /** The daemon's build fingerprint: a UI compares it with its own before it starts using the host. */
+  def identity(using Frame): HostIdentity < (Async & Abort[TerminalError | Closed])
 
   /** Asks the daemon to shut down, ending every shell it holds. */
   def stop(using Frame): Unit < (Async & Abort[TerminalError | Closed])
@@ -28,14 +30,26 @@ private[corvi] trait TerminalService:
   def attach(id: SessionId)(using Frame): Snapshot < (Async & Abort[TerminalError | Closed])
   def history(id: SessionId, from: Int, count: Int)(using Frame): Seq[Row] < (Async & Abort[TerminalError | Closed])
   def text(id: SessionId, text: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+  def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+  def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+  def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
+
+  /** Acknowledges a frame sequence after the renderer has applied it, releasing the host's one-frame backpressure window. */
+  def ack(id: SessionId, seq: Long)(using Frame): Unit < (Async & Abort[TerminalError | Closed])
 
 /** Where the host's pushes land on the client: damage as it is produced, and the session's end. A renderer applies the first to its frame
   * and marks the tab from the second.
   */
 private[corvi] trait FrameSink:
   def damage(id: SessionId, damage: Damage): Unit < Sync
+
+  /** The framed variant: `seq` is acknowledged by a view that owns the host's backpressure window. Test sinks can keep the old seam. */
+  def damage(id: SessionId, seq: Long, damage: Damage): Unit < Sync =
+    val _ = seq
+    this.damage(id, damage)
+
   def ended(id: SessionId, ended: Ended): Unit < Sync
 
 /** `TerminalService` over a `kyo-jsonrpc` peer handler. */
@@ -48,6 +62,9 @@ private[corvi] final class TerminalClient(handler: JsonRpcHandler) extends Termi
 
   def status(using Frame): HostStatus < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[Unit, HostStatus](Methods.Status, ()))
+
+  def identity(using Frame): HostIdentity < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[Unit, HostIdentity](Methods.Identity, ()))
 
   def stop(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[Unit, Unit](Methods.Stop, ()))
@@ -67,11 +84,23 @@ private[corvi] final class TerminalClient(handler: JsonRpcHandler) extends Termi
   def text(id: SessionId, text: String)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[TextParams, Unit](Methods.Text, TextParams(id, text)))
 
+  def mouse(id: SessionId, input: MouseInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[MouseParams, Unit](Methods.Mouse, MouseParams(id, input)))
+
+  def key(id: SessionId, input: KeyInput)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[KeyParams, Unit](Methods.Key, KeyParams(id, input)))
+
+  def focus(id: SessionId, focused: Boolean)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[FocusParams, Unit](Methods.Focus, FocusParams(id, focused)))
+
   def resize(id: SessionId, size: TermSize)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[ResizeParams, Unit](Methods.Resize, ResizeParams(id, size)))
 
   def close(id: SessionId)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
     run(handler.call[SessionParams, Unit](Methods.Close, SessionParams(id)))
+
+  def ack(id: SessionId, seq: Long)(using Frame): Unit < (Async & Abort[TerminalError | Closed]) =
+    run(handler.call[AckParams, Unit](Methods.Ack, AckParams(id, seq)))
 
   /** A wire failure becomes the typed error the host raised: the code says which one, and `data` carries its fields. Anything else is kept
     * as the peer described it, rather than being flattened into a message string.

@@ -18,6 +18,15 @@ private[corvi] trait TerminalView[N]:
   /** The shell behind it exited. */
   def onEnded(listener: Ended => Unit): Unit
 
+  /** Re-measures the terminal at a new font size. The model, viewport and selection stay where they are. */
+  def setFontSize(size: Double): Unit
+
+  /** Opens this view's find bar. */
+  def openFind(): Unit
+
+  /** Hides the find bar and drops its matches, without sending anything to the shell. */
+  def clearFind(): Unit
+
   /** Releases the client side of the view. The host and the shell are not touched. */
   def dispose(): Unit
 
@@ -34,6 +43,12 @@ private[corvi] trait TerminalViewFactory[N]:
     * first frame already fits the window instead of being resized into it. An area that has not been laid out yet gives the default grid.
     */
   def gridFor(width: Double, height: Double): TermSize
+
+  /** The font size views from this factory are created with. */
+  def fontSize: Double
+
+  /** Replaces the factory's font metrics; later views use the new size. Existing views are updated through their own `setFontSize`. */
+  def setFontSize(size: Double): Unit
 
   /** Ends the session behind a closed tab, which is what closing a tab means in Corvi. */
   def close(info: SessionInfo): Unit
