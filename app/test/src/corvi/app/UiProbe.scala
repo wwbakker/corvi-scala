@@ -3,7 +3,6 @@ package corvi.app
 import corvi.contract.*
 import corvi.host.HostSession
 import corvi.protocol.TerminalError
-import corvi.renderer.TerminalMetrics
 import corvi.renderer.given
 import corvi.ui.{Ending, Selection as TabSelection, ShellView, Stylesheet, TerminalWindow, Theme, WindowId}
 import kyo.Frame as KyoFrame
@@ -31,7 +30,6 @@ import scala.concurrent.duration.*
   */
 object UiProbe:
   private val waitTimeout: scala.concurrent.duration.Duration = 30.seconds
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
 
   def main(args: Array[String]): Unit =
     val finished = CountDownLatch(1)
@@ -50,16 +48,15 @@ object UiProbe:
 
   private def run(): Int =
     val reporter = Reporter()
-    val running = Harness.start(100, 28, pushInterval, HostSession.loginShell)
+    val running = Harness.start(100, 28, HostSession.loginShell)
     var stage: Option[Stage] = None
     try
       val sessions = listSessions(running).getOrElse(fail("the harness host answered no list"))
-      val metrics = onFx(TerminalMetrics.monospaced(13))
       // The client, not a service and a sink picked separately: a view only hears its session's pushes through the sink the host was wired
       // with, so the factory takes the pair (`Harness` is where it is made).
       val client = running.client
       val sink = client.sink
-      val factory = RendererViewFactory(client, metrics, java.lang.System.getProperty("user.dir"))
+      val factory = RendererViewFactory(client, 13.0, java.lang.System.getProperty("user.dir"))
       val shell = onFx {
         val built = ShellView(factory)
         sessions.headOption.foreach(built.open)
@@ -134,6 +131,39 @@ object UiProbe:
       )
       reporter.report("ctrl-b 9 selects nothing", ignored, s"${onFx(shell.current.selection)}, ${onFx(shell.current.windows.size)} windows")
 
+      // One app-level preference: the chord re-measures every mounted terminal, not only the selected one.
+      val beforeFont = onFx(sink.views.map(_.fontMetrics.font.getSize).distinct)
+      onFx(press(scene, KeyCode.EQUALS, control = true, shift = true, alt = false, meta = false))
+      val grew = poll(scala.concurrent.duration.Duration(5, "s"))(
+        onFx(sink.views.nonEmpty && sink.views.forall(_.fontMetrics.font.getSize == 14.0))
+      )
+      reporter.report(
+        "the font chord re-measures every terminal",
+        grew && beforeFont.contains(13.0),
+        s"before $beforeFont, after ${onFx(sink.views.map(_.fontMetrics.font.getSize))}"
+      )
+      onFx(press(scene, KeyCode.DIGIT0, control = true, shift = true, alt = false, meta = false))
+      val resetFont = poll(scala.concurrent.duration.Duration(5, "s"))(
+        onFx(sink.views.nonEmpty && sink.views.forall(_.fontMetrics.font.getSize == 13.0))
+      )
+      reporter.report(
+        "and reset returns every terminal to the default",
+        resetFont,
+        s"after reset ${onFx(sink.views.map(_.fontMetrics.font.getSize))}"
+      )
+
+      // A find bar belongs to its tab: selecting another tab drops its query and highlights.
+      onFx(click(windowTab(shell, 0)))
+      val findWindow = onFx(shell.current.windows.head.id)
+      val findView = onFx(sink.views.find(_.session == sessionOf(shell, findWindow))).getOrElse(fail("no selected view"))
+      onFx {
+        findView.openFind()
+        findView.findBar.field.setText("terminal")
+      }
+      onFx(click(windowTab(shell, 1)))
+      val findCleared = poll(scala.concurrent.duration.Duration(5, "s"))(!onFx(findView.findBar.isOpen))
+      reporter.report("switching tabs clears the find bar", findCleared, s"open ${onFx(findView.findBar.isOpen)}")
+
       // Output in a background tab bells it, and never the selected one.
       onFx(click(windowTab(shell, 0)))
       val background = onFx(shell.current.windows.lift(1).map(_.id))
@@ -168,6 +198,31 @@ object UiProbe:
         s"${onFx(tabLabelText(shell, 1))}"
       )
 
+      // A fresh UI lists the ended session with its end. Opening that session must bring the tab back ended, not looking like it still runs.
+      val endedSession = sessionOf(shell, ending)
+      val endedInfo = listSessions(running).flatMap(_.find(_.id == endedSession))
+      val reattached = endedInfo.exists { info =>
+        val reopened = onFx {
+          val view = ShellView(factory)
+          view.open(info)
+          view
+        }
+        val window = onFx(reopened.current.windows.headOption.map(entry => (entry.state, entry.ending)))
+        onFx(reopened.dispose())
+        window.exists { case (state, end) =>
+          state == TerminalWindow.State.Ended &&
+          end.exists {
+            case Ending.Exited(Some(_)) => true
+            case _                      => false
+          }
+        }
+      }
+      reporter.report(
+        "a reattached ended session is ended, with its code",
+        reattached,
+        endedInfo.map(info => s"running ${info.running}, ended ${info.ended}").getOrElse("the ended session is not listed")
+      )
+
       // The label cascade: an ended tab is faint while you are not looking at it, and keeps its current colour when you are.
       reporter.report(
         "an ended tab in the background is quiet",
@@ -188,11 +243,14 @@ object UiProbe:
       onFx(rightClick(windowTab(shell, 2)))
       val menuFired = onFx(fireCloseMenuItem())
       val closed = poll(waitTimeout)(onFx(shell.current.windows.size) == 2)
-      val sessionsAfter = listSessions(running).getOrElse(Vector.empty)
+      // The tab disappears before the host's close request comes back: poll the host, rather than reading the list in the same tick.
+      val sessionGone = poll(waitTimeout)(
+        listSessions(running).exists(sessions => !sessions.exists(_.id == closingSession))
+      )
       reporter.report(
         "the context menu's Close tab closes the window and ends the session",
-        menuFired && closed && !sessionsAfter.exists(_.id == closingSession),
-        s"fired $menuFired, windows ${onFx(shell.current.windows.size)}"
+        menuFired && closed && sessionGone,
+        s"fired $menuFired, windows ${onFx(shell.current.windows.size)}, session gone $sessionGone"
       )
       reporter.report(
         "and the closed tab leaves the client's sink",

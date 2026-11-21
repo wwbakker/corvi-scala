@@ -22,8 +22,10 @@ import scala.concurrent.duration.*
   */
 object HostMain extends KyoApp:
 
-  /** A push tick every 16 ms: 60 frames a second, which is what a screen can show. */
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(16.millis)
+  /** Backpressure is opt-in. Binary damage and client-side coalescing already bound the queue; the one-frame acknowledgement round trip
+    * proved slower in the paging profile, and a lost acknowledgement could leave a client waiting forever.
+    */
+  private val backpressure: Boolean = sys.env.get("CORVI_HOST_BACKPRESSURE").contains("1")
 
   run {
     for
@@ -50,7 +52,7 @@ object HostMain extends KyoApp:
         val _ = Files.deleteIfExists(paths.socket)
         val _ = Files.deleteIfExists(paths.ownerFile)
       })
-      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(pushInterval, HostSession.loginShell)))(_.shutdown)
+      host <- Scope.acquireRelease(Sync.defer(HostSessions.init(HostSession.loginShell, backpressure)))(_.shutdown)
       stop <- Latch.init(1)
       startedAt <- Sync.defer(java.lang.System.currentTimeMillis())
       _ <- Fiber.init(acceptLoop(server, host, token, stop, startedAt))

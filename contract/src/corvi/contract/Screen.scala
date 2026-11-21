@@ -19,7 +19,7 @@ enum CellWidth derives CanEqual:
   *
   * `text` is a whole code point rather than a `Char`, because a terminal cell can hold any Unicode scalar value and a `Char` cannot hold
   * one outside the BMP (an emoji is a surrogate pair, and the emulator stores its two halves in two cells). `None` colours are the
-  * session's `TerminalTheme`.
+  * session's `TerminalTheme`. `link` is the explicit OSC 8 target when the host extracted one; the renderer never invents links.
   */
 final case class Cell(
     text: String,
@@ -29,7 +29,8 @@ final case class Cell(
     bold: Boolean,
     italic: Boolean,
     underline: Boolean,
-    inverse: Boolean
+    inverse: Boolean,
+    link: Option[String] = None
 ) derives CanEqual
 
 /** One row of the visible grid. */

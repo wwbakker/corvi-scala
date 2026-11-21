@@ -14,9 +14,6 @@ import scala.concurrent.duration.*
   * ./mill -i host.test.runMain corvi.host.ProtocolProbe
   */
 object ProtocolProbe:
-  /** A push tick every 200 ms: slow enough that a delta covers several updates, fast enough not to slow the checks down. */
-  private val pushInterval: kyo.Duration = kyo.Duration.fromScala(200.millis)
-
   private val waitTimeout: scala.concurrent.duration.Duration = 20.seconds
 
   def main(args: Array[String]): Unit =
@@ -37,7 +34,7 @@ object ProtocolProbe:
     val reporter = Reporter()
     for
       cache <- FrameCache.init
-      peers <- TerminalPeers.inMemory(cache, pushInterval, HostSession.loginShell)
+      peers <- TerminalPeers.inMemory(cache, HostSession.loginShell)
       (client, host) = peers
       main <- screenChecks(client, cache, reporter)
       listed <- client.list
@@ -152,6 +149,8 @@ object ProtocolProbe:
       )
       _ = report("and the deltas are deltas, not whole screens", widest < attached.size.rows, s"widest delta $widest")
 
+      _ <- wireInputChecks(client, cache, info.id, reporter)
+
       converged <- converges(client, cache, info.id)
       settled <- cache.frame(info.id)
       fresh <- client.attach(info.id)
@@ -167,6 +166,58 @@ object ProtocolProbe:
       _ = report("a damage row outside the grid is dropped, not thrown", dropped.contains(true), s"${dropped.map(_ => "unchanged")}")
 
     yield info.id
+
+  /** Keys over the wire: the host's encoder, not the client, turns them into the session's bytes. The printable case also proves the
+    * enum-with-payload survives the schema and that the Meta prefix is the host's.
+    */
+  private def wireInputChecks(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command =
+      "stty raw -echo; printf 'WIRE_%s\\n' READY; dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+        "printf '\\nWIRE_%s\\n' DONE; stty sane\n"
+    for
+      _ <- client.text(id, command)
+      _ <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("WIRE_READY"))
+      _ <- client.key(id, KeyInput(TerminalKey.Up, KeyModifiers.none))
+      _ <- client.key(id, KeyInput(TerminalKey.Printable("a"), KeyModifiers(shift = false, alt = true, control = false, meta = false)))
+      keyed <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("WIRE_DONE"))
+      keyHex = keyed.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
+      _ = reporter.report("keys over the wire are encoded by the host", keyHex.contains("1b5b411b61"), keyHex.takeRight(30))
+      _ <- focusWireCheck(client, cache, id, reporter)
+      _ <- linkWireCheck(client, cache, id, reporter)
+    yield ()
+
+  /** The focus route with 1004 enabled, so the host has a reason to write the two reports into the raw reader. */
+  private def focusWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command =
+      "printf '\\033[?1004h'; stty raw -echo; printf 'FOCUS_%s\\n' READY; dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+        "printf '\\nFOCUS_%s\\n' DONE; printf '\\033[?1004l'; stty sane\n"
+    for
+      _ <- client.text(id, command)
+      _ <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("FOCUS_READY") && frame.modes.focusReporting)
+      _ <- client.focus(id, focused = true)
+      _ <- client.focus(id, focused = false)
+      focused <- awaitFrame(cache, id)(frame => frame.rows.map(text).mkString.contains("FOCUS_DONE"))
+      focusHex = focused.map(frame => frame.rows.map(text).mkString.filterNot(_.isWhitespace)).getOrElse("")
+      _ = reporter.report("focus events over the wire are encoded by the host", focusHex.contains("1b5b491b5b4f"), focusHex.takeRight(30))
+    yield ()
+
+  /** An OSC 8 link has to survive the frame/damage codec, not only the host's in-process snapshot. */
+  private def linkWireCheck(client: TerminalService, cache: FrameCache, id: SessionId, reporter: Reporter)(using
+      Frame
+  ): Unit < (Async & Abort[Any]) =
+    val command = "printf '\\033]8;;https://example.com\\007WIRELINK\\033]8;;\\007\\n'\n"
+    for
+      _ <- client.text(id, command)
+      linked <- awaitFrame(cache, id)(frame => frame.rows.exists(_.cells.exists(_.link.contains("https://example.com"))))
+      link = linked match
+        case Maybe.Present(frame) => frame.rows.flatMap(_.cells).flatMap(_.link).headOption
+        case Maybe.Absent         => None
+      _ = reporter.report("an OSC 8 link survives the frame codec", link.contains("https://example.com"), link.getOrElse("no link"))
+    yield ()
 
   /** A height-only resize (where the rows that survive must not be blanked), a shrink, and history. */
   private def resizeAndHistoryChecks(client: TerminalService, cache: FrameCache, info: SessionInfo, reporter: Reporter)(using
@@ -289,10 +340,11 @@ object ProtocolProbe:
       )
 
       listed <- client.list
+      listedEnd = listed.find(_.id == main)
       _ = report(
-        "an ended session stays listed, so a tab can show its final screen",
-        listed.exists(entry => entry.id == main && !entry.running),
-        s"${listed.map(entry => s"${entry.id.value}: running ${entry.running}").mkString(", ")}"
+        "an ended session stays listed with its end, so a reattaching tab can show both",
+        listedEnd.exists(entry => !entry.running && entry.ended.exists(_.code.contains(0))),
+        s"${listedEnd.map(entry => s"running ${entry.running}, ended ${entry.ended.map(describe)}").getOrElse("missing")}"
       )
 
       // A shell that is gone takes no input and no resize, and says so in a type rather than an exception.
@@ -383,7 +435,7 @@ object ProtocolProbe:
     val report = reporter.report
     for
       cache <- FrameCache.init
-      peers <- TerminalPeers.inMemory(cache, pushInterval, Seq("/nonexistent/corvi-shell"))
+      peers <- TerminalPeers.inMemory(cache, Seq("/nonexistent/corvi-shell"))
       (client, _) = peers
       attempt <- Abort.run[TerminalError | Closed](client.create(cwd, TermSize(80, 24)))
       _ = report(

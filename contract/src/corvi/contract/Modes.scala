@@ -4,8 +4,9 @@ package corvi.contract
   * any motion.
   *
   * `Focus` is DECSET 1004, focus in/out reports. It is not mouse reporting at all, but jeditermfx-core models it as a `MouseMode`, so the
-  * contract keeps it beside the others and a client that only cares about mice can ignore it. Mode 9 (the original "X10" reporting) has no
-  * case: the engine does not implement it, and an enum case nothing can produce is a lie in every `match` over it.
+  * contract keeps it beside the others and a client that only cares about mice can ignore it. The engine's emulator does not actually set
+  * this member for 1004 (its handler is a no-op), so a live frame uses `Modes.focusReporting` instead. Mode 9 (the original "X10"
+  * reporting) has no case: the engine does not implement it, and an enum case nothing can produce is a lie in every `match` over it.
   */
 enum MouseMode derives CanEqual:
   case Off, Click, Highlight, ButtonMotion, AnyMotion, Focus
@@ -20,11 +21,16 @@ enum MouseFormat derives CanEqual:
   *
   * The title lives here, not in `SessionInfo`, so that a title change is a frame change and reaches a client through damage like any other.
   * `SessionInfo` describes the session; this describes what the terminal is doing right now.
+  *
+  * `focusReporting` is DECSET 1004 kept separate from `mouseMode`: a full-screen program can enable focus reports and mouse reports at the
+  * same time, and Pi does. `MouseMode.Focus` remains the engine's mapping of the same mode number, but the host tracks the actual 1004
+  * state itself because the emulator does not expose it through a mode callback.
   */
 final case class Modes(
     alternateScreen: Boolean,
     mouseMode: MouseMode,
     mouseFormat: MouseFormat,
     bracketedPaste: Boolean,
-    title: String
+    title: String,
+    focusReporting: Boolean = false
 ) derives CanEqual

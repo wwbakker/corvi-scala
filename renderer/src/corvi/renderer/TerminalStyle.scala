@@ -8,6 +8,8 @@ import javafx.scene.paint.Color
   */
 final case class TerminalStyle(
     selectionFill: Color,
+    findFill: Color,
+    findCurrentFill: Color,
     cursor: Color,
     newOutputFill: Color,
     newOutputText: Color
@@ -41,6 +43,8 @@ object TerminalStyle:
   val default: TerminalStyle = TerminalStyle(
     // Corvi's `--accent` #316dca at 35%, so a selection reads as the same accent the rest of the app uses.
     selectionFill = Color.web("#316dca", 0.35),
+    findFill = Color.web("#d29922", 0.35),
+    findCurrentFill = Color.web("#d29922", 0.8),
     cursor = Color.rgb(230, 237, 243, 0.85),
     newOutputFill = Color.rgb(35, 134, 54, 0.95),
     newOutputText = Color.rgb(240, 246, 252)

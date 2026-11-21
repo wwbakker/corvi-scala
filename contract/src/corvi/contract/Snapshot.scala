@@ -41,5 +41,23 @@ final case class Damage(
     */
   def applyTo(before: Snapshot): Snapshot = Frame.from(before).apply(this).snapshot
 
+  /** Combines two deltas that describe the same screen, later values winning. A client that falls behind can therefore apply the newest
+    * state instead of replaying every intermediate frame; rows are absolute, so the merge is just a row-indexed overwrite.
+    */
+  def merge(other: Damage): Damage =
+    if other.isEmpty then this
+    else if isEmpty then other
+    else
+      val byRow = scala.collection.mutable.LinkedHashMap.empty[Int, Row]
+      rows.foreach(change => byRow.update(change.row, change.cells))
+      other.rows.foreach(change => byRow.update(change.row, change.cells))
+      Damage(
+        rows = byRow.iterator.map((row, cells) => RowDamage(row, cells)).toVector,
+        size = other.size.orElse(size),
+        cursor = other.cursor.orElse(cursor),
+        modes = other.modes.orElse(modes),
+        historyRows = other.historyRows.orElse(historyRows)
+      )
+
 object Damage:
   val none: Damage = Damage(Vector.empty, None, None, None, None)

@@ -8,9 +8,13 @@ import scalafx.scene.layout.VBox
   * placeholder gives the tab strip something to point at when nothing is running.
   */
 private[corvi] object Overview:
+
+  /** The chord the rest of the shell listens for, said the way the platform spells it. */
+  private val openChord: String = if Chords.isMacPlatform then "⌘T" else "ctrl-alt-t"
+
   def apply(): VBox =
     new VBox:
-      val _ = styleClass ++= Seq("overview")
+      val _ = styleClass ++= Seq("overview-placeholder")
       alignment = Pos.TopLeft
       spacing = 10
       children = Seq(
@@ -18,5 +22,7 @@ private[corvi] object Overview:
         new Label("The Corvi terminal, rebuilt: the host owns the screens, the window only paints them.") {
           val _ = styleClass ++= Seq("overview-body")
         },
-        new Label("Open a terminal with the new tab, or with ⌘T.") { val _ = styleClass ++= Seq("overview-body") }
+        new Label(s"Open a terminal with the new tab, or with $openChord.") {
+          val _ = styleClass ++= Seq("overview-body")
+        }
       )

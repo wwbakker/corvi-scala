@@ -1,5 +1,6 @@
 package corvi.renderer
 
+import corvi.contract.LinkPolicy
 import javafx.animation.{Animation, KeyFrame, Timeline}
 import javafx.scene.canvas.Canvas
 import javafx.util.Duration
@@ -15,6 +16,10 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
 
   private var shown: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
+  private var preedit: Option[Preedit] = None
+  private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
+  private var findIndex: Option[Int] = None
+  private var hovered: Option[CellPosition] = None
   private var cursorOn: Boolean = true
   private var blinkOverride: Option[Boolean] = None
   private var baseFocus: Boolean = false
@@ -40,6 +45,38 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     this.selection = selection
     repaint()
 
+  /** The IME's composed text, drawn over the grid and never written into the model. */
+  def setPreedit(value: Option[Preedit]): Unit =
+    preedit = value
+    repaint()
+
+  /** Find matches in document coordinates, with the selected one drawn more strongly. */
+  def setFind(matches: Vector[TerminalSearch.Match], current: Option[Int]): Unit =
+    findMatches = matches
+    findIndex = current
+    repaint()
+
+  /** The cell the pointer is over, if it carries an allowed link; the painter underlines the link run. */
+  def setHover(position: Option[CellPosition]): Unit =
+    if position != hovered then
+      hovered = position
+      repaint()
+
+  /** The explicit link at a canvas point, with unsafe schemes refused here as well as at the opener. */
+  def linkAt(x: Double, y: Double): Option[String] =
+    shown.flatMap { model =>
+      val position = positionAt(x, y)
+      model.row(position.row).cells.lift(position.col).flatMap(_.link).filter(LinkPolicy.allows)
+    }
+
+  /** For the hover/click tests. */
+  private[corvi] def hoveredLink: Option[String] =
+    for
+      model <- shown
+      position <- hovered
+      link <- model.row(position.row).cells.lift(position.col).flatMap(_.link).filter(LinkPolicy.allows)
+    yield link
+
   /** Blinking, or its absence, as an override: the frame can ask for blinking on every damage and this still wins. */
   def setBlinking(enabled: Boolean): Unit =
     blinkOverride = Some(enabled)
@@ -52,6 +89,18 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
   def setBaseFocus(focused: Boolean): Unit =
     baseFocus = focused
     if focusOverride.isEmpty then repaint()
+
+  /** Pauses the blink while the view is hidden: a background tab must not repaint its whole canvas twice a second for a cursor nobody can
+    * see. `show` on the next reveal resumes it from the frame's blink state.
+    */
+  def pauseBlink(): Unit =
+    blink.pause()
+
+  /** Stops the one animation this canvas owns. A view removes its node from the scene when its tab closes; a timeline that is still playing
+    * would keep the canvas alive after that.
+    */
+  def dispose(): Unit =
+    blink.stop()
 
   /** Focus as an override, for a harness without a window manager. */
   def showFocus(focused: Boolean): Unit =
@@ -70,7 +119,19 @@ final class TerminalCanvas(metrics: TerminalMetrics, style: TerminalStyle) exten
     setHeight(metrics.layout.height(rows))
 
   def repaint(): Unit =
-    shown.foreach(model => painter.paint(getGraphicsContext2D, model, selection, cursorOn, focusOverride.getOrElse(baseFocus)))
+    shown.foreach(model =>
+      painter.paint(
+        getGraphicsContext2D,
+        model,
+        selection,
+        preedit,
+        findMatches,
+        findIndex,
+        hovered,
+        cursorOn,
+        focusOverride.getOrElse(baseFocus)
+      )
+    )
 
   private def applyBlink(enabled: Boolean): Unit =
     if enabled then blink.play()

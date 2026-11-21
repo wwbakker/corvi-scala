@@ -75,16 +75,20 @@ failure.
 ./verify                                                # format check, every suite, then the five probe mains
 ./verify --quick                                        # the suites only
 ./mill --no-daemon __.test                              # every JUnit/TestFX suite in the build
-./mill -i ui.test                                       # 25 JUnit tests: ShellState transitions, the chord matrix
-./mill -i renderer.test                                 # 14 JUnit tests: ScreenModel, Layout, Selection
-./mill -i app.test                                      # the TestFX suite: the daemon-backed window, end to end
-./mill -i host.test.runMain corvi.host.HostProbe        # 49 checks: PTY, VT emulation, snapshot/damage, history, resize
-./mill -i host.test.runMain corvi.host.ProtocolProbe    # 30 checks: routes, typed errors, auth, pushes, reconnects
-./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 23 checks: the socket daemon, token, stop, leaks, liveness, pushes
-./mill -i app.test.runMain corvi.app.RendererProbe      # 31 checks: the renderer, selection, scrollback, captures
-./mill -i app.test.runMain corvi.app.UiProbe            # 29 checks: the window, tabs, chords, bells, menus, drag
+./mill -i ui.test                                       # 49 JUnit tests: ShellState transitions, chords, font preference
+./mill -i renderer.test                                 # 51 JUnit tests: ScreenModel, Layout, Selection, key mapping, preedit, search, links
+./mill -i host.test                                     # JUnit tests: registry, binds, key/mouse/focus/paste input
+./mill -i app.test                                      # the TestFX suite: the daemon-backed window, keys and mouse
+./mill -i host.test.runMain corvi.host.HostProbe        # 60 checks: PTY, VT emulation, keys, links, snapshot/damage, history, resize
+./mill -i host.test.runMain corvi.host.ProtocolProbe    # 33 checks: routes, typed errors, links, auth, pushes, reconnects
+./mill -i host.test.runMain corvi.host.HostDaemonProbe  # 24 checks: the socket daemon, token, stop, leaks, liveness, pushes
+./mill -i app.test.runMain corvi.app.RendererProbe      # 39 checks: the renderer, paste, IME, font size, find, selection, scrollback, captures
+./mill -i app.test.runMain corvi.app.UiProbe            # 33 checks: the window, tabs, chords, font size, find, bells, menus, drag
 ./mill -i app.test.runMain corvi.app.RendererSnapshot   # writes out/corvi-renderer.png and out/corvi-renderer-unfocused.png
 ```
+
+`./scripts/pi-paging-profile.sh` reproduces and profiles the Pi paging report against a copy of the newest Pi session; see
+`docs/paging-profile.md`.
 
 `app.test` passes a socket of its own through `forkEnv` (a short `/tmp` path: a Unix socket path is limited to ~104
 bytes) and kills the daemon it started, so it never touches the user's host. It drives the window with the same JavaFX
@@ -133,6 +137,11 @@ for this code base is the first-party skill in [`.agents/skills/kyo-scala/`](.ag
 | right-click a tab → `Close tab` | close it, on any platform |
 | `⌘C` / `ctrl-shift-C` | copy the selection |
 | `⌘V` / `ctrl-shift-V` | paste |
+| `⌘F` / `ctrl-shift-F` | find in the selected terminal |
+| `⌘=` / `ctrl-shift-=` | increase terminal font size |
+| `⌘-` / `ctrl-shift--` | decrease terminal font size |
+| `⌘0` / `ctrl-shift-0` | reset terminal font size |
+| `⌘-click` (macOS) / `ctrl-click` | open an OSC 8 `http`, `https` or `file` link |
 
 ### Keys
 
@@ -142,14 +151,54 @@ does the rest. Copy and paste are the window's own chords: **⌘C / ⌘V on macO
 elsewhere. Ctrl+C is never a copy chord; the plain printable keys, Shift-only characters, Backspace (`^?`), Enter, Tab and Escape are
 forwarded as before, and a shortcut's typed companion (the `c` the platform sends after ⌘C) is swallowed rather than typed.
 
-**Option-composed characters pass through**: Option+E / Option+U / Option+A / Option+5 / Option+G enter é/ü/å/∞/© as the platform composes
-them, because Alt is not treated as a shortcut here — its `KEY_TYPED` is the text. Alt-as-Meta/Alt-as-Escape is **not** forwarded: Alt is
-passed as a composed character, not as the terminal's Meta prefix.
+**Arrows, navigation, function keys and modified keys work.** Up/Down/Left/Right, Home/End, PageUp/PageDown, Insert/Delete, F1–F12,
+Shift+Tab and their Shift/Control/Alt/Meta combinations go through the host's `session.key` route. The host uses JediTermFX's own key
+encoder, so the bytes follow the session's modes: DECCKM's `ESC O A` versus `ESC [ A`, xterm's `CSI 1;N` modifier suffixes, and `ESC [ Z`
+for Shift+Tab. The renderer sends the semantic key (`TerminalKey` + `KeyModifiers`); it does not invent escape strings. Backspace (`^?`),
+Enter, Tab and Escape keep their direct bytes, and plain printable text (including Shift-only characters) still goes through
+`session.text`. The byte-level and Pi smoke evidence is in [docs/key-input.md](docs/key-input.md).
 
-Paste is **not** wrapped in bracketed-paste escapes: a multi-line paste runs each line, so pasting a script executes it (Corvi's own
-bracketed-paste handling is a follow-up). Not implemented, deliberately: find, hyperlinks, font-size and `⌘-click`. **Arrow keys,
-modified function keys and mouse reports are still not forwarded**: they need the host's mode-dependent encoding and a `session.key`/`session.mouse` route, which is a renderer
-follow-up.
+**Alt/Option has a deliberate mode.** `Compose` preserves the old behaviour: Option+E / Option+U / Option+A / Option+5 / Option+G enter
+é/ü/å/∞/© as the platform composes them, because the composed `KEY_TYPED` is the text. `Meta` and `Escape` treat Alt+printable as
+Meta+key and send `ESC` followed by the character; the host adds the prefix. Alt+special keys always use the key encoder, so Alt+Left is
+the modified arrow rather than a composed character. The renderer's Alt+printable table follows the US layout for shifted digits and
+punctuation, so Alt+Shift+1 is `!` even on another layout; a key outside the table falls back to the platform's typed character. The
+default is `Compose` on macOS, where Option composes accents, and `Escape` elsewhere. Until there is a settings UI, set
+`CORVI_ALT_MODE=compose`, `meta` or `escape` (or `-Dcorvi.altMode=...`) before starting the app. One known limitation: where a platform
+reports AltGr as Control+Alt, the non-Compose Alt modes currently swallow its composed typed character; Alt-only composition in Compose
+mode is unaffected. Keypad keys are not part of this slice: the engine has only keypad cursor constants, which duplicate the arrows, and
+no keypad digits or Enter.
+
+**Paste is bracketed when the program asks for it.** If the current frame has `2004` enabled, the clipboard is sent as
+`ESC[200~ <clipboard> ESC[201~`; otherwise the clipboard is sent unchanged, so a shell without bracketed paste keeps the old behaviour.
+The text is not inspected or rewritten, and in that mode a multi-line paste is one paste rather than one command per line. The wrapping
+decision comes from the last frame, so a paste racing a `2004` disable can send the bracket markers as literal text.
+
+**Mouse reports are forwarded** when the program asks for them (`1000`, `1001`, `1002`, `1003`): clicks, drags, the vertical and horizontal
+wheel, and the back/forward buttons are encoded by the host in the session's format (`1005`, `1006`, `1015` or X10), so a TUI such as Pi
+works as it does in Corvi. Shift-drag, or Option-drag on macOS, keeps the mouse for a local text selection while such a program is
+running. **Focus reporting (`1004`)** is forwarded only while the program has it enabled: focus-in is `ESC[I`, focus-out `ESC[O`, and
+every other mode ignores the window's focus changes.
+
+**IME text is committed on `session.text`.** A committed composition goes to the shell exactly as typed text does. The platform's preedit
+is drawn over the cursor cell with a background and underline and never written into the host grid; committing clears it and sends only
+the committed text. The view supplies the minimal JavaFX `InputMethodRequests` needed for candidate-window placement. See
+[docs/ime.md](docs/ime.md) for behaviour and manual checks.
+
+**Find is per terminal and searches history plus the live grid.** `⌘F` / `ctrl-shift-F` opens the selected tab's find bar. The first
+query asks the host for all available scrollback, then searches literally and case-insensitively; matches in history scroll into view,
+the current match is highlighted more strongly, and Enter / the arrows cycle through them. Escape closes the bar; switching tabs or
+ending the session drops its query and highlights. There is no regex and no search of output the host has not sent yet. See
+[docs/find-and-font.md](docs/find-and-font.md).
+
+**Font size is a window preference.** The chords above re-measure every mounted terminal on the FX thread, replace its canvas, keep the
+model, selection and scrollback position, and ask the host for a grid that fits the new metrics. New tabs inherit the current size. It is
+runtime state only until a settings layer exists. See [docs/find-and-font.md](docs/find-and-font.md).
+
+**OSC 8 links are explicit and restricted.** The host records the URI the engine passes to `setLinkUriStarted`; only `http`, `https` and
+`file` targets reach a cell. The renderer underlines a link under the pointer and changes the cursor to a hand, and `⌘-click` on macOS or
+`ctrl-click` elsewhere asks the app to open it. The app validates the scheme again before calling `HostServices.showDocument`; URL
+auto-detection and editor/file-line links are later work. See [docs/hyperlinks.md](docs/hyperlinks.md).
 
 ## Where the state lives
 
@@ -159,7 +208,8 @@ follow-up.
 | which tabs exist, which is selected, bells, ended state | the **UI**, in one immutable `ShellState` with pure transitions |
 | each session's rendered frame | the **UI**, one cached frame per session, updated by damage for *all* sessions |
 | theme | `SessionInfo` (the renderer needs it for a cell with no colour of its own) |
-| title, mouse mode, alternate screen | the frame's `Modes`, because they change with the terminal's state |
+| title, mouse mode/format, alternate screen, bracketed paste, focus reporting | the frame's `Modes`, because they change with the terminal's state |
+| find query and highlights, font size | the **UI**: find is per view; font size is one window preference for now |
 
 History is capped at 5,000 rows per session (Corvi's own default). Damage is absolute and idempotent: applying it twice
 is the same as once, and a stale delta after a resize is dropped rather than thrown. A resize is debounced by the side
@@ -180,8 +230,15 @@ takes per operation.
 - **Starting.** The UI connects, and if nothing answers spawns the daemon with this JVM's own `java`, classpath and Kyo
   flags, detached (no handle kept, stdin `/dev/null`, output written to `host.log`, truncated on every spawn). Then it
   waits for the socket and says hello.
+- **Reconnecting.** If the socket closes, the window disposes its old views and client, shows `Host lost; reconnecting. The previous
+  shells ended with the host.`, and retries `HostConnection.ensure` with 250 ms → 4 s exponential backoff. A replacement host is
+  listed and its sessions are attached; an empty replacement leaves the window on Overview with the New action, never a silently created
+  blank terminal. Old shells are not preserved: host death is shell death. A build-mismatch restart stays a separate path that replaces the
+  daemon and preserves its socket/token. See [docs/reconnect.md](docs/reconnect.md) for the manual checks.
 - **Reattaching.** A UI start is `sessions.list`, `attach` for each session, seed the frame, then live pushes. Damage is
-  pushed per client from that client's own baseline, so two clients can watch the same host without disturbing each other.
+  pushed per client from that client's own baseline, so two clients can watch the same host without disturbing each other. If the
+  daemon reports a different build (`host.identity`) from the UI's own host classes, the UI stops the old daemon and starts a new one;
+  that is a host restart, so its shells end with it.
 - **Stopping.** `host.stop` ends the accept loop; the sessions are released (their shells destroyed), the socket and the
   owner marker are unlinked, and the process exits. There is no idle exit: the daemon lives until stopped or killed.
 
@@ -248,17 +305,20 @@ The window lifecycle, the tab strip and the host's client registry each had a bu
 
 ## Known limitations
 
-- **No reconnect when the host dies.** The UI attaches once; if the daemon goes away the window keeps the last frames it
-  received. The architecture makes the host's death the shells' death, so this is recorded rather than hidden: restart
-  the window to reconnect to whatever host answers then. A UI restart against a *live* host works — that is the case in
-  scope.
+- **Reconnecting is automatic, not a manual retry UI.** Host loss disposes the old views and retries with bounded backoff (250 ms to
+  4 s); there is no Retry-now button yet. Old shells are gone with the host, so a replacement host starts with whatever sessions it has
+  (possibly none, which lands on Overview). Restart the window only for a manual reset.
 - **No idle exit for the daemon**, and no `setsid`: a launcher that kills its whole process group takes the daemon with it.
   A packaged app needs its own launcher, and packaging itself is out of scope.
 - **Unix socket only.** Windows (a TCP or named-pipe transport) is not implemented; the transport seam is the only part
   that would change.
-- **Arrow keys and mouse reports are not forwarded** (see [Keys](#keys)). Control keys, copy and paste are; the mode-dependent key and
-  mouse encoding lives in the host's future.
-- **No find, no hyperlinks** in the renderer, and no IME.
+- **Links are explicit OSC 8 only.** Plain URLs in output are not auto-detected; `http`, `https` and `file` are the only schemes opened,
+  and opening is a platform click with `⌘`/`ctrl`.
+- **Find is literal only.** It searches the loaded history plus the live grid, with no regex or future output; the first query asks for
+  all history the host currently has. Matches are refreshed on history arrivals, not on every live-frame change.
+- **Font size is runtime state.** It is not persisted and has no settings UI; all views in the window share it.
+- **IME preedit is an overlay.** Its text-run highlight styles are not drawn, candidate placement is cursor-cell based, and the
+  platform's offset/cancel requests are approximate; committed text is real input (see [docs/ime.md](docs/ime.md)).
 - **macOS arm64 is the only exercised platform.** The build selects the right classifier elsewhere; nothing else has run.
 - **No packaging.** No `jpackage`/`jlink`, no app bundle, signing, update path or icon.
 - **The UI probes need a display server** (not a visible display); they drive real JavaFX events and real processes.

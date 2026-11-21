@@ -57,6 +57,11 @@ private[host] final class RecordingDisplay extends TerminalDisplay:
 
   override def setBracketedPasteMode(enabled: Boolean): Unit = update(_.copy(bracketedPaste = enabled))
 
+  /** DECSET 1004 is independent of the mouse modes and the engine does not report it through `terminalMouseModeSet`; the host's input
+    * tracker calls this when it sees the private mode sequence.
+    */
+  def setFocusReporting(enabled: Boolean): Unit = update(_.copy(focusReporting = enabled))
+
   /** The terminal's own size changes are driven by `HostSession.resize`, not by a display callback. */
   override def onResize(newTermSize: TermSize, origin: RequestOrigin): Unit = ()
 
@@ -79,6 +84,7 @@ private[host] object RecordingDisplay:
       mouseMode: corvi.contract.MouseMode,
       mouseFormat: corvi.contract.MouseFormat,
       bracketedPaste: Boolean,
+      focusReporting: Boolean,
       title: String
   )
 
@@ -92,6 +98,7 @@ private[host] object RecordingDisplay:
     mouseMode = corvi.contract.MouseMode.Off,
     mouseFormat = corvi.contract.MouseFormat.X10,
     bracketedPaste = false,
+    focusReporting = false,
     title = ""
   )
 

@@ -21,6 +21,9 @@ final case class TermSize(cols: Int, rows: Int) derives CanEqual
   * `index` is the order the host created sessions in, which is the order a tab strip shows them: sorting by id would put `session-10`
   * before `session-2`. The client should draw from a `Snapshot` rather than from this: the title, the theme and the cells all live in the
   * frame.
+  *
+  * `ended` is the end a session already reached, when it is still listed so a client can reattach to its final screen. A client that
+  * attaches after the end therefore learns the same exit code, closed flag and failure reason as one that was attached when it happened.
   */
 final case class SessionInfo(
     id: SessionId,
@@ -28,5 +31,11 @@ final case class SessionInfo(
     size: TermSize,
     historyRows: Int,
     running: Boolean,
-    shellPid: Long
-) derives CanEqual
+    shellPid: Long,
+    ended: Option[Ended]
+) derives CanEqual:
+
+  /** What a reattaching tab should show: the recorded end, or the bare fact that this session is no longer running. The fallback keeps an
+    * older host's `running = false` meaningful even when it does not carry an `Ended` value.
+    */
+  def ending: Option[Ended] = ended.orElse(Option.when(!running)(Ended(code = None, closed = false, reason = None)))

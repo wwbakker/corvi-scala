@@ -14,7 +14,6 @@ import scala.concurrent.duration.*
   */
 final class RegistryTest:
 
-  private val interval: kyo.Duration = kyo.Duration.fromScala(16.millis)
   private def cwd: String = java.lang.System.getProperty("user.dir")
 
   @Test
@@ -22,7 +21,7 @@ final class RegistryTest:
     val (session, before, after) = runKyo {
       Scope.run {
         for
-          host <- HostSessions.init(interval, HostSession.loginShell)
+          host <- HostSessions.init(HostSession.loginShell)
           session <- host.create(cwd, TermSize(40, 10))
           client <- host.nextClientId
           peer <- handler
@@ -48,7 +47,7 @@ final class RegistryTest:
     val (attached, after) = runKyo {
       Scope.run {
         for
-          host <- HostSessions.init(interval, HostSession.loginShell)
+          host <- HostSessions.init(HostSession.loginShell)
           first <- host.create(cwd, TermSize(40, 10))
           second <- host.create(cwd, TermSize(42, 12))
           client <- host.nextClientId
@@ -71,7 +70,7 @@ final class RegistryTest:
     val after = runKyo {
       Scope.run {
         for
-          host <- HostSessions.init(interval, HostSession.loginShell)
+          host <- HostSessions.init(HostSession.loginShell)
           session <- host.create(cwd, TermSize(40, 10))
           client <- host.nextClientId
           peer <- handler
@@ -93,7 +92,7 @@ final class RegistryTest:
     val rounds = runKyo {
       Scope.run {
         for
-          host <- HostSessions.init(interval, HostSession.loginShell)
+          host <- HostSessions.init(HostSession.loginShell)
           rounds <- Async.foreach(1 to 8) { _ =>
             for
               session <- host.create(cwd, TermSize(40, 10))

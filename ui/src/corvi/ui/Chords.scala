@@ -16,6 +16,10 @@ private[corvi] object Chords:
     case PrefixArmed
     case Open
     case CloseSelected
+    case Find
+    case IncreaseFont
+    case DecreaseFont
+    case ResetFont
     case Select(index: Int)
     case Passed
     case PassedShortcut
@@ -65,6 +69,10 @@ private[corvi] object Chords:
     key match
       case Key.Open                               => Outcome.Open
       case Key.Close if mac                       => Outcome.CloseSelected
+      case Key.Find                               => Outcome.Find
+      case Key.IncreaseFont                       => Outcome.IncreaseFont
+      case Key.DecreaseFont                       => Outcome.DecreaseFont
+      case Key.ResetFont                          => Outcome.ResetFont
       case Key.Prefix                             => Outcome.PrefixArmed
       case Key.Create if state.waiting(now)       => Outcome.Open
       case Key.Digit(index) if state.waiting(now) => Outcome.Select(index)
@@ -76,7 +84,7 @@ private[corvi] object Chords:
     * typed companion is not a character. Alt is not a shortcut modifier: Option-composed characters are input.
     */
   enum Key derives CanEqual:
-    case Open, Close, Prefix, Create, Shortcut, Other
+    case Open, Close, Find, IncreaseFont, DecreaseFont, ResetFont, Prefix, Create, Shortcut, Other
     case Digit(index: Int)
 
   object Key:
@@ -94,6 +102,14 @@ private[corvi] object Chords:
 
       if mac && meta && !control && !alt && !shift && code == KeyCode.T then Key.Open
       else if mac && meta && !control && !alt && !shift && code == KeyCode.W then Key.Close
+      else if mac && meta && !control && !alt && !shift && code == KeyCode.F then Key.Find
+      else if !mac && control && shift && !meta && !alt && code == KeyCode.F then Key.Find
+      else if mac && meta && !control && !alt && !shift && (code == KeyCode.EQUALS || code == KeyCode.PLUS) then Key.IncreaseFont
+      else if !mac && control && shift && !meta && !alt && (code == KeyCode.EQUALS || code == KeyCode.PLUS) then Key.IncreaseFont
+      else if mac && meta && !control && !alt && !shift && code == KeyCode.MINUS then Key.DecreaseFont
+      else if !mac && control && shift && !meta && !alt && code == KeyCode.MINUS then Key.DecreaseFont
+      else if mac && meta && !control && !alt && !shift && code == KeyCode.DIGIT0 then Key.ResetFont
+      else if !mac && control && shift && !meta && !alt && code == KeyCode.DIGIT0 then Key.ResetFont
       else if !mac && control && alt && !meta && !shift && code == KeyCode.T then Key.Open
       else if control && !meta && !alt && !shift && code == KeyCode.B then Key.Prefix
       else if plain && code == KeyCode.C then Key.Create

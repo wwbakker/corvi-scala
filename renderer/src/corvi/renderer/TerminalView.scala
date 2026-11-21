@@ -4,14 +4,25 @@ import corvi.contract.*
 import corvi.protocol.*
 import javafx.animation.PauseTransition
 import javafx.application.Platform
-import javafx.geometry.{Insets, Orientation}
+import javafx.geometry.{Insets, Orientation, Point2D}
+import javafx.scene.Cursor
 import javafx.scene.control.ScrollBar
-import javafx.scene.input.{Clipboard, ClipboardContent, KeyCode, MouseButton, ScrollEvent}
+import javafx.scene.input.{
+  Clipboard,
+  ClipboardContent,
+  InputMethodEvent,
+  InputMethodRequests,
+  KeyCode,
+  MouseButton as JfxMouseButton,
+  ScrollEvent
+}
 import javafx.scene.layout.{Background, BackgroundFill, BorderPane, CornerRadii}
 import javafx.scene.paint.Color
 import javafx.util.Duration
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import kyo.*
 import kyo.Frame
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 /** One terminal on screen: the canvas, its scrollbar, and the input that goes back to the host.
@@ -24,30 +35,60 @@ import scala.util.Try
   * that knows whether the user is still dragging its edge. 500 ms as upstream's panel does, and 100 ms on the alternate screen, where a
   * full-screen program repainting on every step would be the expensive part.
   */
-final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: TerminalMetrics)
-    extends BorderPane
+final class TerminalView(
+    calls: SessionCalls,
+    val session: SessionId,
+    metrics: TerminalMetrics,
+    altMode: AltMode = AltMode.configured,
+    openLink: String => Unit = _ => ()
+) extends BorderPane
     with FrameSink
     with SessionEvents:
 
   private val style: TerminalStyle = TerminalStyle.default
-  private val canvas: TerminalCanvas = TerminalCanvas(metrics, style)
+  private var currentMetrics: TerminalMetrics = metrics
+  private var canvas: TerminalCanvas = TerminalCanvas(currentMetrics, style)
   private val scrollbar: ScrollBar = new ScrollBar()
+  private[corvi] val findBar: FindBar = FindBar()
   scrollbar.setOrientation(Orientation.VERTICAL)
 
   private var model: Option[ScreenModel] = None
   private var selection: Option[Selection] = None
+  private var pressedTerminalButton: Option[MouseButton] = None
   private var failure: Option[String] = None
   private var end: Option[Ended] = None
   private var blinking: Boolean = false
   private var activityListeners: Vector[() => Unit] = Vector.empty
   private var endedListeners: Vector[Ended => Unit] = Vector.empty
   private var blinkOverride: Option[Boolean] = None
+  private var focusOverride: Option[Boolean] = None
   private var liveBefore: Boolean = true
+
+  /** The IME's composed text. It lives here and on the canvas, never in the host's grid; committing it sends only the committed text. */
+  private var preedit: Option[Preedit] = None
+
+  private var findMatches: Vector[TerminalSearch.Match] = Vector.empty
+  private var findIndex: Int = -1
+  private var findHistoryRequestedFor: Option[Int] = None
+
+  private val linkModifierIsControl: Boolean =
+    !Option(java.lang.System.getProperty("os.name")).getOrElse("").toLowerCase.contains("mac")
+
+  /** An Alt+printable press was sent as a Meta key, so its typed companion is not a character. It is cleared by that companion, or by the
+    * next press when the platform sends none.
+    */
+  private var metaKeyTaken: Boolean = false
 
   /** Damage that arrived before the snapshot did: the host's first push can beat its own attach reply across two fibers, and the delta is
     * computed against the snapshot, so it is exactly what this view needs once seeded rather than something to drop.
     */
   private var pendingDamage: Vector[Damage] = Vector.empty
+
+  /** Latest damage waiting for the FX thread, coalesced: a client that falls behind applies the newest screen instead of queueing one
+    * `Platform.runLater` per frame. The boolean is the single scheduled drain.
+    */
+  private val batchedDamage: AtomicReference[Option[(Long, Damage)]] = new AtomicReference(None)
+  private val batchScheduled: AtomicBoolean = new AtomicBoolean(false)
 
   /** The grid the last resize asked for, until the host's frame confirms it: the answer is a round trip away and the view must not ask
     * twice.
@@ -58,6 +99,11 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     * rearm the debounce and defer the request forever.
     */
   private var mismatchScheduled: Option[TermSize] = None
+
+  /** The history page the host has been asked for and not answered yet. Output arriving while the reader is scrolled back can make the
+    * viewport need rows it does not have on every damage tick; this keeps that from becoming one request per frame.
+    */
+  private var historyRequest: Option[(Int, Int)] = None
 
   /** How much damage a view that has not attached yet may hold. The host can push before the attach answer lands, so the deltas are kept
     * until the seed arrives — but a view whose attach never completes must not grow the window's memory with a session it will never show.
@@ -86,6 +132,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   locally:
     setFocusTraversable(true)
     setCenter(canvas)
+    setTop(findBar)
     setRight(scrollbar)
     // The view itself is the terminal's colour, so the pixels between the grid and the window edge are not the toolkit's theme.
     setBackground(Background(BackgroundFill(Color.rgb(13, 17, 23), CornerRadii.EMPTY, Insets.EMPTY)))
@@ -96,18 +143,47 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val _ = scrollbar.managedProperty().bind(scrollbar.visibleProperty())
     // The scrollbar runs the other way round from the model: its bottom is the live grid, because that is where a scrollbar's "end" is.
     val _ = scrollbar.valueProperty().addListener((_, _, value) => scrollTo(math.round(scrollbar.getMax() - value.doubleValue()).toInt))
-    val _ = focusedProperty().addListener((_, _, focused) => canvas.setBaseFocus(focused))
+    val _ = focusedProperty().addListener((_, _, focused) => focusChanged(focused))
+    // A terminal in a background tab still receives frames, but painting it would compete with the tab on screen. It applies the model
+    // while hidden, draws once when the shell makes it visible again, and pauses the cursor blink in between.
+    val _ = visibleProperty().addListener((_, _, visible) =>
+      if visible then redraw()
+      else canvas.pauseBlink()
+    )
     val _ = widthProperty().addListener((_, _, _) => scheduleResize())
     val _ = heightProperty().addListener((_, _, _) => scheduleResize())
+    val _ = findBar.field.textProperty().addListener((_, _, _) => runFind())
+    findBar.next.setOnAction(_ => nextFind())
+    findBar.previous.setOnAction(_ => previousFind())
+    findBar.close.setOnAction(_ => closeFind())
+    val _ = findBar.field.setOnKeyPressed { event =>
+      event.getCode match
+        case KeyCode.ESCAPE =>
+          event.consume()
+          closeFind()
+        case KeyCode.ENTER =>
+          event.consume()
+          if event.isShiftDown then previousFind() else nextFind()
+        case _ => ()
+    }
     // Printable characters come from KEY_TYPED; the keys that are not characters come from KEY_PRESSED, because KEY_TYPED reports them as
     // control codes the shell would not recognise (`\b` where macOS's `stty erase` expects `^?`). A Command or Control shortcut's typed
     // companion is ignored: the platform sends a KEY_TYPED for the same keystroke even when the window took it, and \u2318C must not also
-    // type a "c". Option is deliberately not in that test: an Option-composed character *is* this event, with Alt still down, and it is the
-    // text the shell should receive. Arrows are still not forwarded: they need the host's mode-dependent key encoding.
+    // type a "c". Option is only text in Compose mode: in Meta/Escape, the pressed key is sent through the key route and the platform's
+    // composed companion is swallowed.
     val _ = setOnKeyTyped { event =>
       val typed = event.getCharacter
       val shortcut = event.isMetaDown || event.isControlDown
-      if !shortcut && typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar then calls.text(session, typed)
+      if end.isEmpty then
+        if event.isAltDown && altMode != AltMode.Compose then
+          // The press normally took the key. If this platform sent no press the typed character is still the key, so it becomes printable
+          // input rather than falling through as composed text. A Control/Meta companion is a shortcut, not a Meta key: Ctrl+Alt and
+          // Cmd+Option must not leak an escape-prefixed letter, and AltGr's Control+Alt report must not either.
+          if !metaKeyTaken && !shortcut && isTypedText(typed) then
+            calls.key(session, KeyInput(TerminalKey.Printable(typed), keyModifiers(event)))
+          metaKeyTaken = false
+          event.consume()
+        else if !shortcut && isTypedText(typed) then calls.text(session, typed)
     }
     val _ = setOnKeyPressed { event =>
       val code = event.getCode
@@ -115,11 +191,19 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       val control = event.isControlDown
       val shift = event.isShiftDown
       val alt = event.isAltDown
+      metaKeyTaken = false
+      if findBar.isOpen && code == KeyCode.ESCAPE then
+        event.consume()
+        closeFind()
       // Copy and paste are the window's own chords, decided before anything is sent: a terminal keeps Ctrl+C for SIGINT, so copy is
       // Cmd+C (or Ctrl+Shift+C as the alias). Control codes then carry every other Control chord to the shell.
-      if ControlKeys.isCopy(code, meta, control, shift, alt) then
+      else if ControlKeys.isCopy(code, meta, control, shift, alt) then
         event.consume()
         val _ = copySelection()
+      else if end.nonEmpty then
+        // The screen is still selectable, but a finished shell takes no input. Swallowing the key also keeps a late key from becoming
+        // a `session has ended` error for every keystroke.
+        event.consume()
       else if ControlKeys.isPaste(code, meta, control, shift, alt) then
         event.consume()
         pasteClipboard()
@@ -128,20 +212,100 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
           case Some(bytes) =>
             event.consume()
             calls.text(session, bytes)
-          case None => editingKey(code, event)
-      else editingKey(code, event)
+          case None => nonControlKey(code, event)
+      else nonControlKey(code, event)
     }
+    // IME composition arrives separately from KEY_TYPED. The committed text is ordinary input; the composed text is only painted over
+    // the cursor cell until the platform commits or cancels it.
+    val _ = setOnInputMethodTextChanged { event =>
+      if end.isEmpty then inputMethodChanged(event)
+    }
+    setInputMethodRequests(new InputMethodRequests:
+      override def getTextLocation(offset: Int): Point2D = textLocation()
+      // The renderer does not own an editable text buffer to map a screen point back into; the platform only needs a location for the
+      // candidate window, which `getTextLocation` supplies.
+      override def getLocationOffset(x: Int, y: Int): Int = 0
+      // The host owns the grid: undoing committed text here would be a second input path.
+      override def cancelLatestCommittedText(): Unit = ()
+      override def getSelectedText(): String = null)
     val _ = setOnMousePressed(event =>
-      if event.getButton == MouseButton.PRIMARY then
-        requestFocus()
-        selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
-        redraw()
+      requestFocus()
+      val link =
+        if linkModifier(event) && event.getButton == JfxMouseButton.PRIMARY && insideCanvas(event.getX, event.getY) then
+          canvas.linkAt(event.getX, event.getY)
+        else None
+      link match
+        case Some(target) =>
+          event.consume()
+          openLink(target)
+        case None =>
+          terminalButton(event.getButton) match
+            case Some(button) if reportingMode.nonEmpty && !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
+              pressedTerminalButton = Some(button)
+              sendMouse(event.getX, event.getY, Some(button), MouseAction.Press, event)
+              event.consume()
+            case _ if event.getButton == JfxMouseButton.PRIMARY =>
+              pressedTerminalButton = None
+              selection = Some(Selection.at(canvas.positionAt(event.getX, event.getY)))
+              redraw()
+            case _ => ()
     )
     val _ = setOnMouseDragged(event =>
-      selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
-      redraw()
+      if reportingMode.nonEmpty && forcesSelection(event) then
+        selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
+        redraw()
+      else
+        reportingMode match
+          case Some(MouseMode.AnyMotion) if insideCanvas(event.getX, event.getY) =>
+            sendMouse(event.getX, event.getY, pressedTerminalButton, MouseAction.Move, event)
+            event.consume()
+          case Some(MouseMode.ButtonMotion) if insideCanvas(event.getX, event.getY) =>
+            pressedTerminalButton.foreach { button =>
+              sendMouse(event.getX, event.getY, Some(button), MouseAction.Move, event)
+              event.consume()
+            }
+          case Some(_) => ()
+          case None    =>
+            selection = selection.map(current => current.draggedTo(canvas.positionAt(event.getX, event.getY)))
+            redraw()
     )
-    val _ = setOnScroll((event: ScrollEvent) => scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel))
+    val _ = setOnMouseMoved(event =>
+      updateHover(event.getX, event.getY)
+      reportingMode match
+        case Some(MouseMode.AnyMotion)
+            if pressedTerminalButton.isEmpty && !forcesSelection(event) &&
+              insideCanvas(event.getX, event.getY) =>
+          sendMouse(event.getX, event.getY, None, MouseAction.Move, event)
+          event.consume()
+        case _ => ()
+    )
+    val _ = setOnMouseExited(_ => clearHover())
+    val _ = setOnMouseReleased(event =>
+      pressedTerminalButton match
+        case Some(button) =>
+          // Report the release even when the pointer left the grid: a release outside the canvas must not leave the program believing
+          // the button is still down.
+          sendMouse(event.getX, event.getY, Some(button), MouseAction.Release, event)
+          pressedTerminalButton = None
+          event.consume()
+        case None =>
+          if reportingMode.isEmpty && event.getButton == JfxMouseButton.PRIMARY then redraw()
+    )
+    val _ = setOnScroll((event: ScrollEvent) =>
+      reportingMode match
+        case Some(_) if !forcesSelection(event) && insideCanvas(event.getX, event.getY) =>
+          val button =
+            if event.getDeltaX != 0 then Some(if event.getDeltaX > 0 then MouseButton.WheelRight else MouseButton.WheelLeft)
+            else if event.getDeltaY != 0 then Some(if event.getDeltaY > 0 then MouseButton.WheelUp else MouseButton.WheelDown)
+            else None
+          button.foreach { wheel =>
+            sendMouse(event.getX, event.getY, Some(wheel), MouseAction.Press, event)
+            event.consume()
+          }
+        case _ =>
+          // A horizontal-only wheel event has nothing to scroll in this viewport; do not treat its zero deltaY as "down".
+          if event.getDeltaY != 0 then scrollBy(if event.getDeltaY > 0 then stepsPerWheel else -stepsPerWheel)
+    )
     resizeTimer.setOnFinished(_ => requestGridForSize())
 
   /** Joins the host's session: ask for the snapshot that seeds this view. Called after the sink has plugged it, so a delta the host sends
@@ -173,7 +337,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** Types without a keyboard, which is how a harness drives a session. Real input arrives through the key handler below and takes the same
     * path.
     */
-  def typeText(text: String): Unit = calls.text(session, text)
+  def typeText(text: String): Unit =
+    if end.isEmpty then calls.text(session, text)
 
   def select(from: CellPosition, to: CellPosition): Unit =
     selection = Some(Selection(from, to))
@@ -196,10 +361,86 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       }.failed.foreach(error => report(s"the clipboard refused the selection: $error"))
     copied
 
-  /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. */
+  /** Types the clipboard at the shell. An empty or unreadable clipboard is not a keystroke, so it sends nothing. When the program enabled
+    * bracketed paste, the text is wrapped and otherwise untouched; without it, the previous plain-text behaviour is the fallback.
+    */
   def pasteClipboard(): Unit =
     val pasted = Try(Option(Clipboard.getSystemClipboard().getString)).toOption.flatten.getOrElse("")
-    if pasted.nonEmpty then calls.text(session, pasted)
+    if end.isEmpty && pasted.nonEmpty then
+      val wrapped =
+        if model.exists(_.frame.modes.bracketedPaste) then s"\u001b[200~$pasted\u001b[201~"
+        else pasted
+      calls.text(session, wrapped)
+
+  /** The focus property's listener and the deterministic test seam both land here, so a harness can drive the same path without relying on
+    * a window manager to move the keyboard.
+    */
+  private[corvi] def focusChanged(focused: Boolean): Unit =
+    canvas.setBaseFocus(focused)
+    if !focused then setPreedit(None)
+    if end.isEmpty && model.exists(_.frame.modes.focusReporting) then calls.focus(session, focused)
+
+  /** The composed text currently painted over the cursor; for the IME tests and probes. */
+  private[corvi] def composition: Option[Preedit] = preedit
+
+  private def inputMethodChanged(event: InputMethodEvent): Unit =
+    val committed = Option(event.getCommitted).getOrElse("")
+    val composed = Option(event.getComposed).map(_.asScala.map(_.getText).mkString).getOrElse("")
+    if committed.nonEmpty then calls.text(session, committed)
+    if composed.nonEmpty then setPreedit(Some(Preedit(composed, event.getCaretPosition)))
+    else setPreedit(None)
+
+  private def setPreedit(value: Option[Preedit]): Unit =
+    preedit = value
+    canvas.setPreedit(value)
+
+  /** The screen location of the cursor cell's lower edge, which is where the platform should place its candidate window.
+    *
+    * JavaFX 26 dereferences this result, so it must never be null: an unattached view, a scrolled-back frame or a node that is not in a
+    * showing window gets `Point2D.ZERO` instead.
+    */
+  private def textLocation(): Point2D =
+    model.filter(_.isLive) match
+      case Some(current) =>
+        val cursor = current.frame.cursor
+        Option(canvas.localToScreen(currentMetrics.layout.cellX(cursor.x), currentMetrics.layout.cellY(cursor.y + 1)))
+          .getOrElse(Point2D.ZERO)
+      case None => Point2D.ZERO
+
+  /** A key the Control-byte table did not consume: a named key goes to the host's encoder, and Alt+printable becomes a Meta key in the
+    * modes that ask for it. The unmodified editing keys keep their direct bytes, which is the one path for them.
+    */
+  private def nonControlKey(code: KeyCode, event: javafx.scene.input.KeyEvent): Unit =
+    KeyMapping.terminalKey(code) match
+      case Some(key) if !KeyMapping.unmodifiedEditingKey(code) || modified(event) => sendKey(key, event)
+      case Some(_)                                                                => editingKey(code, event)
+      case None                                                                   =>
+        if altMode != AltMode.Compose && event.isAltDown && !event.isControlDown && !event.isMetaDown then
+          KeyMapping.printable(code, event.isShiftDown) match
+            case Some(text) =>
+              metaKeyTaken = true
+              event.consume()
+              calls.key(session, KeyInput(TerminalKey.Printable(text), keyModifiers(event)))
+            case None => editingKey(code, event)
+        else editingKey(code, event)
+
+  private def sendKey(key: TerminalKey, event: javafx.scene.input.KeyEvent): Unit =
+    event.consume()
+    calls.key(session, KeyInput(key, keyModifiers(event)))
+
+  private def keyModifiers(event: javafx.scene.input.KeyEvent): KeyModifiers =
+    KeyModifiers(
+      shift = event.isShiftDown,
+      alt = event.isAltDown,
+      control = event.isControlDown,
+      meta = event.isMetaDown
+    )
+
+  private def modified(event: javafx.scene.input.KeyEvent): Boolean =
+    event.isShiftDown || event.isAltDown || event.isControlDown || event.isMetaDown
+
+  private def isTypedText(typed: String): Boolean =
+    typed.nonEmpty && typed.charAt(0) >= ' ' && typed.charAt(0) != 0x7f.toChar
 
   /** The keys that are sent as themselves rather than as a character: Backspace is `^?` (what macOS's `stty erase` expects), and Enter, Tab
     * and Escape are the bytes a terminal sends for them.
@@ -227,7 +468,103 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     canvas.setBlinking(enabled)
 
   /** Focus, for a harness without a window manager: focused draws a filled cursor, unfocused a hollow one. */
-  def showFocus(focused: Boolean): Unit = canvas.showFocus(focused)
+  def showFocus(focused: Boolean): Unit =
+    focusOverride = Some(focused)
+    canvas.showFocus(focused)
+
+  /** Replaces the metrics and canvas, keeping the model, selection and viewport, then asks the host for the new grid. Runs on the FX
+    * thread; a caller from another thread is marshalled here.
+    */
+  def setFontSize(size: Double): Unit =
+    if size != currentMetrics.font.getSize then
+      if Platform.isFxApplicationThread then replaceCanvas(TerminalMetrics.monospaced(size))
+      else Platform.runLater(() => setFontSize(size))
+
+  /** The current metrics, for the font-size tests. */
+  private[corvi] def fontMetrics: TerminalMetrics = currentMetrics
+
+  private def replaceCanvas(nextMetrics: TerminalMetrics): Unit =
+    val previous = canvas
+    val replacement = TerminalCanvas(nextMetrics, style)
+    currentMetrics = nextMetrics
+    model.foreach(current => replacement.show(current, selection))
+    blinkOverride.foreach(replacement.setBlinking)
+    replacement.setPreedit(preedit)
+    focusOverride.fold(replacement.setBaseFocus(isFocused))(replacement.showFocus)
+    replacement.setFind(findMatches, Option.when(findIndex >= 0)(findIndex))
+    previous.dispose()
+    canvas = replacement
+    setCenter(replacement)
+    resizeTimer.stop()
+    lastRequested = None
+    mismatchScheduled = None
+    requestGridForSize()
+    requestLayout()
+
+  /** Opens the find bar and searches the loaded history + live grid. A first search asks for all available history. */
+  def openFind(): Unit =
+    if end.isEmpty then
+      findHistoryRequestedFor = None
+      findBar.open()
+      runFind()
+      scheduleResize()
+
+  /** Hides the find bar and drops its matches. This is what leaving a tab and ending a session do. */
+  def clearFind(): Unit =
+    val wasOpen = findBar.isOpen
+    findMatches = Vector.empty
+    findIndex = -1
+    findHistoryRequestedFor = None
+    findBar.hide()
+    findBar.setStatusText("")
+    canvas.setFind(Vector.empty, None)
+    if wasOpen then scheduleResize()
+
+  private def closeFind(): Unit =
+    clearFind()
+    requestFocus()
+
+  private def runFind(preserveIndex: Boolean = false): Unit =
+    if findBar.isOpen then
+      val previous = findIndex
+      model.foreach(ensureFindHistory)
+      findMatches = model.map(current => TerminalSearch.search(current, findBar.query)).getOrElse(Vector.empty)
+      findIndex =
+        if findMatches.isEmpty then -1
+        else if preserveIndex && previous >= 0 then math.min(previous, findMatches.size - 1)
+        else 0
+      // A text change starts at the first match; a history update keeps the reader where they were unless there was no match before.
+      applyFind(scroll = !preserveIndex || previous < 0)
+
+  private def nextFind(): Unit =
+    if findMatches.nonEmpty then
+      findIndex = (findIndex + 1) % findMatches.size
+      applyFind(scroll = true)
+
+  private def previousFind(): Unit =
+    if findMatches.nonEmpty then
+      findIndex = Math.floorMod(findIndex - 1, findMatches.size)
+      applyFind(scroll = true)
+
+  /** The current matches and selected index, for the find tests and probes. */
+  private[corvi] def findState: (Vector[TerminalSearch.Match], Option[Int]) =
+    (findMatches, Option.when(findIndex >= 0)(findIndex))
+
+  private def applyFind(scroll: Boolean): Unit =
+    findBar.setStatusText(
+      if findBar.query.isEmpty then ""
+      else if findMatches.isEmpty then "0/0"
+      else s"${findIndex + 1}/${findMatches.size}"
+    )
+    canvas.setFind(findMatches, Option.when(findIndex >= 0)(findIndex))
+    if scroll && findIndex >= 0 then model.foreach(current => scrollTo(TerminalSearch.scrollOffsetFor(current, findMatches(findIndex).row)))
+
+  /** A search needs the whole loaded history, not only the page the viewport happens to have asked for. */
+  private def ensureFindHistory(current: ScreenModel): Unit =
+    val wanted = current.maxScroll
+    if wanted > current.history.size && !findHistoryRequestedFor.contains(wanted) then
+      findHistoryRequestedFor = Some(wanted)
+      calls.history(session, 1, wanted)
 
   /** Asks the host to close this session, which is what closing a tab does. The host then reports the end through the usual push. */
   def closeSession(): Unit = calls.close(session)
@@ -235,7 +572,12 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** Releases what this view owns: the resize timer waits on the FX thread and the client runtime parks on a queue, and both would outlive
     * a closed tab otherwise.
     */
-  def dispose(): Unit = resizeTimer.stop()
+  def dispose(): Unit =
+    clearFind()
+    resizeTimer.stop()
+    setPreedit(None)
+    batchedDamage.set(None)
+    canvas.dispose()
 
   /** Moves the viewport by `delta` rows: positive goes further back into history, negative towards the live grid. Reaching the bottom is
     * what returns to the live grid; anything above it is history the client asks the host for.
@@ -246,7 +588,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       model = Some(next)
       // A selection is in viewport rows, so it stops meaning anything the moment they move: the terminal this replaces clears it too.
       if next.scrollOffset != current.scrollOffset then selection = None
-      if next.missingHistory > 0 then calls.history(session, from = 1, count = math.min(next.maxScroll, next.scrollOffset + next.rows))
+      requestMissingHistory(next)
       updateScrollbar(next)
       redraw()
     }
@@ -259,7 +601,11 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   // --- the runtime's side ---------------------------------------------------------------------------------------------------------
 
   override def damage(id: SessionId, damage: Damage): Unit < Sync =
-    pushDamage(id, damage)
+    pushDamage(id, 0L, damage)
+    Sync.defer(())
+
+  override def damage(id: SessionId, seq: Long, damage: Damage): Unit < Sync =
+    pushDamage(id, seq, damage)
     Sync.defer(())
 
   override def ended(id: SessionId, ended: Ended): Unit < Sync =
@@ -269,9 +615,30 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   /** A push, from whichever thread the host is on; the view hops to the FX thread itself. A sink shared by several tabs calls this
     * directly, because a session's damage goes only to the view that shows that session.
     */
-  def pushDamage(id: SessionId, damage: Damage): Unit =
+  def pushDamage(id: SessionId, damage: Damage): Unit = pushDamage(id, 0L, damage)
+
+  def pushDamage(id: SessionId, seq: Long, damage: Damage): Unit =
     if id == session then
-      val _ = Platform.runLater(() => applyDamage(damage))
+      if Platform.isFxApplicationThread then
+        try applyDamage(damage)
+        finally calls.ack(session, seq)
+      else
+        val _ = batchedDamage.updateAndGet(current => Some(current.fold((seq, damage))((_, existing) => (seq, existing.merge(damage)))))
+        if batchScheduled.compareAndSet(false, true) then
+          val _ = Platform.runLater(() => drainBatchedDamage())
+
+  /** Runs on the FX thread: applies the latest coalesced damage once. A frame that arrives while this one is being applied schedules the
+    * next drain, so a burst becomes at most one paint per FX turn instead of one per host frame.
+    */
+  private def drainBatchedDamage(): Unit =
+    val next = batchedDamage.getAndSet(None)
+    batchScheduled.set(false)
+    next.foreach { (seq, damage) =>
+      try applyDamage(damage)
+      finally calls.ack(session, seq)
+    }
+    if batchedDamage.get().exists((_, damage) => !damage.isEmpty) && batchScheduled.compareAndSet(false, true) then
+      val _ = Platform.runLater(() => drainBatchedDamage())
 
   def pushEnded(id: SessionId, ended: Ended): Unit =
     if id == session then
@@ -286,12 +653,14 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   override def attached(snapshot: Snapshot): Unit =
     val next = ScreenModel.from(snapshot)
     lastRequested = None
+    historyRequest = None
     model = Some(next)
     applyBackground(next.frame.theme)
     updateScrollbar(next)
     val pending = pendingDamage
     pendingDamage = Vector.empty
     pending.foreach(applyToModel)
+    model.foreach(requestMissingHistory)
     redraw()
     noteFrame()
 
@@ -299,8 +668,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     model.foreach { current =>
       val next = current.withHistory(rows)
       model = Some(next)
+      historyRequest = None
       updateScrollbar(next)
       redraw()
+      if findBar.isOpen then runFind(preserveIndex = true)
     }
 
   /** The frame the host applied, after the model has it.
@@ -330,6 +701,8 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
 
   private def acceptEnd(ended: Ended): Unit =
     end = Some(ended)
+    setPreedit(None)
+    clearFind()
     // A session that has ended takes no resizes — the host refuses them — so the view stops asking instead of logging a refusal per tick.
     resizeTimer.stop()
     endedListeners.foreach(listener => listener(ended))
@@ -340,6 +713,7 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     model match
       case Some(_) =>
         applyToModel(damage)
+        model.foreach(requestMissingHistory)
         redraw()
         noteFrame()
       case None => pendingDamage = (pendingDamage :+ damage).takeRight(maxPendingDamage)
@@ -351,20 +725,122 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
       updateScrollbar(next)
     }
 
+  private def linkModifier(event: javafx.scene.input.MouseEvent): Boolean =
+    if linkModifierIsControl then event.isControlDown else event.isMetaDown
+
+  private def updateHover(x: Double, y: Double): Unit =
+    val position = if insideCanvas(x, y) && canvas.linkAt(x, y).nonEmpty then Some(canvas.positionAt(x, y)) else None
+    canvas.setHover(position)
+    setCursor(if position.isDefined then Cursor.HAND else Cursor.DEFAULT)
+
+  private def clearHover(): Unit =
+    canvas.setHover(None)
+    setCursor(Cursor.DEFAULT)
+
+  /** The link under the pointer, for the hover/click test. */
+  private[corvi] def hoveredLink: Option[String] = canvas.hoveredLink
+
+  // --- pointer encoding -------------------------------------------------------------------------------------------------------------
+
+  /** The tracking mode the program asked for, or `None` when the mouse belongs to the view. Scrollback has no live grid to report cells
+    * against, so the wheel and drag stay local there. `Focus` is a focus-report mode, not a pointer mode.
+    */
+  private def reportingMode: Option[MouseMode] =
+    if end.nonEmpty then None
+    else
+      model
+        .filter(_.isLive)
+        .map(_.frame.modes.mouseMode)
+        .filter(mode => mode != MouseMode.Off && mode != MouseMode.Focus)
+
+  /** A modifier-held drag is a selection, the way a terminal's own override works: it keeps text selectable while a full-screen program has
+    * mouse reporting enabled.
+    */
+  private def forcesSelection(event: javafx.scene.input.MouseEvent): Boolean =
+    event.isShiftDown || event.isAltDown
+
+  private def forcesSelection(event: ScrollEvent): Boolean =
+    event.isShiftDown || event.isAltDown
+
+  private def insideCanvas(x: Double, y: Double): Boolean =
+    canvas.getWidth > 0 && canvas.getHeight > 0 && x >= 0 && y >= 0 && x < canvas.getWidth && y < canvas.getHeight
+
+  private def terminalButton(button: JfxMouseButton): Option[MouseButton] =
+    button match
+      case JfxMouseButton.PRIMARY   => Some(MouseButton.Left)
+      case JfxMouseButton.MIDDLE    => Some(MouseButton.Middle)
+      case JfxMouseButton.SECONDARY => Some(MouseButton.Right)
+      case JfxMouseButton.BACK      => Some(MouseButton.Back)
+      case JfxMouseButton.FORWARD   => Some(MouseButton.Forward)
+      case _                        => None
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      event: javafx.scene.input.MouseEvent
+  ): Unit =
+    sendMouse(x, y, button, action, event.isShiftDown, event.isAltDown, event.isControlDown)
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      event: ScrollEvent
+  ): Unit =
+    sendMouse(x, y, button, action, event.isShiftDown, event.isAltDown, event.isControlDown)
+
+  private def sendMouse(
+      x: Double,
+      y: Double,
+      button: Option[MouseButton],
+      action: MouseAction,
+      shift: Boolean,
+      alt: Boolean,
+      control: Boolean
+  ): Unit =
+    val position = canvas.positionAt(x, y)
+    calls.mouse(
+      session,
+      MouseInput(
+        column = position.col,
+        row = position.row,
+        button = button,
+        action = action,
+        modifiers = MouseModifiers(shift = shift, alt = alt, control = control)
+      )
+    )
+
   // --- painting and layout ---------------------------------------------------------------------------------------------------------
 
   private def redraw(): Unit =
-    model.foreach { current =>
-      // A new frame while the user is reading history keeps the viewport where it is and marks that output arrived.
-      if current.isLive != liveBefore then
-        liveBefore = current.isLive
-        updateScrollbar(current)
-      val shouldBlink = blinkOverride.getOrElse(current.frame.cursor.blinking)
-      if shouldBlink != blinking then
-        blinking = shouldBlink
-        canvas.setBlinking(shouldBlink)
-      canvas.show(current, selection)
-    }
+    // Only the visible tab draws. Every mounted tab still advances its model, so switching back is a repaint of the current frame rather
+    // than a replay of every delta that arrived while it was hidden.
+    if isVisible then
+      model.foreach { current =>
+        // A new frame while the user is reading history keeps the viewport where it is and marks that output arrived.
+        if current.isLive != liveBefore then
+          liveBefore = current.isLive
+          updateScrollbar(current)
+        val shouldBlink = blinkOverride.getOrElse(current.frame.cursor.blinking)
+        if shouldBlink != blinking then
+          blinking = shouldBlink
+          canvas.setBlinking(shouldBlink)
+        canvas.show(current, selection)
+      }
+
+  /** Asks the host for the part of the scrollback this viewport now needs. The request is deduped until an answer lands, because a reader
+    * who is scrolled back while a command produces output would otherwise ask again on every damage tick.
+    */
+  private def requestMissingHistory(model: ScreenModel): Unit =
+    val wanted =
+      if model.missingHistory > 0 then Some((1, math.min(model.maxScroll, model.scrollOffset + model.rows)))
+      else None
+    if wanted != historyRequest then
+      historyRequest = wanted
+      wanted.foreach((from, count) => calls.history(session, from, count))
 
   /** The scrollbar is managed exactly while it is visible, so showing or hiding it changes the content area the grid is computed from. That
     * is a layout change the window's size listeners never see, so the transition arms the same debounce a window resize does; the request
@@ -386,10 +862,10 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
     val (cols, rows) = gridForSize()
     TermSize(cols = cols, rows = rows)
 
-  /** The grid the view has room for, in cells. */
+  /** The grid the view has room for, in cells. The find bar is a top pane, so its managed height is not room for rows. */
   private def gridForSize(): (Int, Int) =
-    val layout = metrics.layout
-    (layout.colsFor(math.max(0, getWidth) - scrollbarExtent), layout.rowsFor(math.max(0, getHeight)))
+    val layout = currentMetrics.layout
+    (layout.colsFor(math.max(0, getWidth) - scrollbarExtent), layout.rowsFor(math.max(0, getHeight - findBarExtent)))
 
   /** The room the scrollbar takes from the content area: the layout's own answer, taken from the scrollbar's managed width, never a
     * constant. The scrollbar is managed exactly while it is visible, so a hidden one takes nothing and the grid stops changing the moment
@@ -398,19 +874,25 @@ final class TerminalView(calls: SessionCalls, val session: SessionId, metrics: T
   private def scrollbarExtent: Double =
     if scrollbar.isManaged then math.max(scrollbar.getWidth, scrollbar.prefWidth(-1)) else 0.0
 
+  /** The room the find bar takes from the content area, measured the same way as the scrollbar. A hidden bar is unmanaged and takes
+    * nothing; when it is open, its preferred height is known even before the first layout pass.
+    */
+  private def findBarExtent: Double =
+    if findBar.isManaged then math.max(0.0, math.max(findBar.getHeight, findBar.prefHeight(-1))) else 0.0
+
   private def scheduleResize(): Unit =
     if end.isEmpty && model.isDefined then
       resizeTimer.setDuration(Duration.millis(if model.exists(_.frame.modes.alternateScreen) then 100 else 500))
       resizeTimer.playFromStart()
 
   /** A view that has not been laid out yet has no size, and asking the host to fit a grid to nothing would shrink its shell to a corner.
-    * Only a view with room for the canvas and the scrollbar asks for a grid.
+    * Only a view with room for the canvas, the scrollbar and the find bar asks for a grid.
     */
   private def requestGridForSize(): Unit =
     if end.isEmpty then
       model.foreach { current =>
         val extent = scrollbarExtent
-        if getWidth > extent && getHeight > 0 then
+        if getWidth > extent && getHeight > findBarExtent then
           val (cols, rows) = gridForSize()
           val wanted = TermSize(cols = cols, rows = rows)
           // Once per size: the frame lags the request by a round trip, so without this every tick between the two would resend the same grid.

@@ -2,7 +2,7 @@ package corvi.app
 
 import corvi.contract.{Damage, Ended, Frame, SessionId, TermSize}
 import corvi.protocol.{ClientRoutes, FrameSink, HostPaths, SocketWire, TerminalClient, TerminalError}
-import corvi.renderer.{TerminalMetrics, TerminalView}
+import corvi.renderer.TerminalView
 import corvi.ui.ShellView
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicReference
@@ -56,7 +56,7 @@ final class UiTest:
     FxToolkit.setupFixture(new Runnable {
       def run(): Unit =
         resetHostDirectory()
-        val app = AppWindow(primary, TerminalMetrics.monospaced(13), java.lang.System.getProperty("user.dir"))
+        val app = AppWindow(primary, java.lang.System.getProperty("user.dir"))
         window.set(Some(app))
         // Read before the client's answers can swap the scene: `connect` only schedules the shell, so this is the first frame it showed.
         placeholderShown.set(primary.getScene.getRoot.lookup(".status-view") != null)
@@ -502,6 +502,9 @@ final class UiTest:
     */
   private def stopHost(): Unit =
     val paths = HostPaths.defaultPaths()
+    // The graceful path first: it also works when the command-line check below cannot identify the process.
+    if stillListening(paths) then
+      val _ = stopDaemon(paths)
     destroyMarked(paths)
     awaitGone(paths)
     deleteTree(paths.directory)
@@ -530,7 +533,10 @@ final class UiTest:
   private def destroyMarked(paths: HostPaths): Unit =
     paths.owner().foreach { pid =>
       ProcessHandle.of(pid).ifPresent { handle =>
-        val named = handle.info().commandLine().orElse("").contains("corvi.host.HostMain")
+        val commandLine = handle.info().commandLine().orElse("")
+        // A daemon started by this build has the marker in its JVM flags. The main-class check stays for a short classpath, where the
+        // command line is not truncated before the end.
+        val named = commandLine.contains("-Dcorvi.host.daemon=true") || commandLine.contains("corvi.host.HostMain")
         if named then
           val _ = handle.destroy()
           try

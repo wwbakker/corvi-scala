@@ -1,7 +1,7 @@
 package corvi.app
 
 import corvi.contract.{TerminalView as ShellView, TerminalViewFactory, *}
-import corvi.renderer.{TerminalMetrics, TerminalView}
+import corvi.renderer.{AltMode, TerminalMetrics, TerminalView}
 import javafx.scene.Node as JfxNode
 
 /** The shell's view factory over the real client and renderer: one `TerminalView` per session, and the two session operations a tab needs.
@@ -12,7 +12,16 @@ import javafx.scene.Node as JfxNode
   * `create` and `close` hand their work to the client's runtime and return at once — a host that is slow or wedged must not freeze the
   * window. Results come back on the FX thread, which is where the shell and the hub both live.
   */
-private[app] final class RendererViewFactory(client: Client, metrics: TerminalMetrics, cwd: String) extends TerminalViewFactory[JfxNode]:
+private[app] final class RendererViewFactory(
+    client: Client,
+    initialFontSize: Double,
+    cwd: String,
+    altMode: AltMode = AltMode.configured,
+    openLink: String => Unit = _ => ()
+) extends TerminalViewFactory[JfxNode]:
+
+  /** The current metrics are runtime state, shared by every view this factory opens. */
+  private var metrics: TerminalMetrics = TerminalMetrics.monospaced(initialFontSize)
 
   /** The grid the host gets when the window has not been laid out yet: the size this spike has always started a session at. A first tab
     * asked for before the stage is shown would otherwise be created at one cell per pixel value and then resized into the window.
@@ -20,17 +29,23 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
   private val defaultGrid: TermSize = TermSize(cols = 100, rows = 28)
 
   def open(info: SessionInfo, onActivity: () => Unit, onEnded: Ended => Unit): ShellView[JfxNode] =
-    val inner = TerminalView(client, info.id, metrics)
+    val inner = TerminalView(client, info.id, metrics, altMode, openLink)
     // Plugged before it asks for its snapshot: the host's first damage can otherwise arrive while the view is still absent from the sink.
     client.sink.plug(inner)
     inner.onOutput(onActivity)
     inner.onSessionEnded(onEnded)
     inner.attach()
+    // The host keeps ended sessions so their final screen can be reattached. Tell the view, not only the tab, or it would keep trying to
+    // resize a session that no longer accepts it.
+    info.ending.foreach(inner.sessionEnded)
     new ShellView[JfxNode]:
       def node: JfxNode = inner
       def focus(): Unit = inner.requestFocus()
       def onActivity(listener: () => Unit): Unit = inner.onOutput(listener)
       def onEnded(listener: Ended => Unit): Unit = inner.onSessionEnded(listener)
+      def setFontSize(size: Double): Unit = inner.setFontSize(size)
+      def openFind(): Unit = inner.openFind()
+      def clearFind(): Unit = inner.clearFind()
 
       /** Out of the sink first: a push that lands after this must not touch a disposed view, and the sink must not keep its frame alive. */
       def dispose(): Unit =
@@ -50,3 +65,8 @@ private[app] final class RendererViewFactory(client: Client, metrics: TerminalMe
   def gridFor(width: Double, height: Double): TermSize =
     if width <= 0 || height <= 0 then defaultGrid
     else TermSize(cols = metrics.layout.colsFor(width), rows = metrics.layout.rowsFor(height))
+
+  def fontSize: Double = metrics.font.getSize
+
+  def setFontSize(size: Double): Unit =
+    metrics = TerminalMetrics.monospaced(size)

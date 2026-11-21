@@ -39,10 +39,14 @@ object HostProbe:
     for
       session <- HostSession.open(SessionId("probe"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
       _ <- screenChecks(session, reporter)
+      _ <- linkChecks(session, reporter)
       _ <- sizeAndScrollbackChecks(session, reporter)
       _ <- modeChecks(session, reporter)
+      _ <- focusModeChecks(session, reporter)
       _ <- damageChecks(session, reporter)
       _ <- isolationAndTeardownChecks(session, reporter)
+      keys <- HostSession.open(SessionId("keys"), index = 1, Paths.get(sys.props("user.dir")), HostSession.loginShell)
+      _ <- keyChecks(keys, reporter)
       _ <- scopeChecks(reporter)
     yield reporter.failures
 
@@ -84,7 +88,10 @@ object HostProbe:
       _ = session.write(
         "printf '\\033[31mRED\\033[0m \\033[1;32mGREEN\\033[0m \\033[44;37mBG\\033[0m \\033[7mINV\\033[0m \\033[4mUND\\033[0m\\n'\n"
       )
-      coloured <- await(session)(snapshot => lines(snapshot).exists(_.contains("UND")))
+      // The echoed command contains the same words. Wait for the styled output line, not for a word the echo also has.
+      coloured <- await(session)(snapshot =>
+        cellOf(snapshot, "RED").exists(_.foreground.isDefined) && cellOf(snapshot, "UND").exists(_.underline)
+      )
       red = cellOf(coloured, "RED")
       green = cellOf(coloured, "GREEN")
       _ = report(
@@ -148,6 +155,55 @@ object HostProbe:
       )
     yield ()
 
+  /** OSC 8 links: the engine keeps only an opaque LinkInfo, so the host records the URI beside the resulting HyperlinkStyle. */
+  private def linkChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
+    val report = reporter.report
+    for
+      _ = session.write("printf '\\033]8;;https://example.com\\007LINKED\\033]8;;\\007\\n'\n")
+      linked <- await(session)(snapshot => cellOf(snapshot, "LINKED").flatMap(_.link).contains("https://example.com"))
+      _ = report(
+        "an OSC 8 link is carried on its cells",
+        cellOf(linked, "LINKED").flatMap(_.link).contains("https://example.com"),
+        cellOf(linked, "LINKED").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write("printf '\\033]8;;javascript:alert(1)\\007UNSAFE\\033]8;;\\007\\n'\n")
+      unsafe <- await(session)(snapshot => lines(snapshot).contains("UNSAFE"))
+      _ = report(
+        "an unsafe OSC 8 scheme is not exposed",
+        cellOf(unsafe, "UNSAFE").flatMap(_.link).isEmpty,
+        cellOf(unsafe, "UNSAFE").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write("printf '\\033]8;;https://example.org/other\\007OTHER\\033]8;;\\007\\n'\n")
+      other <- await(session)(snapshot => cellOf(snapshot, "OTHER").flatMap(_.link).contains("https://example.org/other"))
+      _ = report(
+        "two links with the same style keep their own URIs",
+        cellOf(other, "OTHER").flatMap(_.link).contains("https://example.org/other") &&
+          cellOf(other, "LINKED").flatMap(_.link).contains("https://example.com"),
+        s"LINKED ${cellOf(other, "LINKED").flatMap(_.link)}, OTHER ${cellOf(other, "OTHER").flatMap(_.link)}"
+      )
+
+      _ = session.write("printf '\\033]8;;https://example.com/bold\\007\\033[1;31mBOLDLINK\\033]8;;\\007\\n'\n")
+      boldLink <- await(session)(snapshot => cellOf(snapshot, "BOLDLINK").flatMap(_.link).contains("https://example.com/bold"))
+      _ = report(
+        "bold and colour inside a link keep its URI",
+        cellOf(boldLink, "BOLDLINK").flatMap(_.link).contains("https://example.com/bold"),
+        cellOf(boldLink, "BOLDLINK").flatMap(_.link).getOrElse("no link")
+      )
+
+      _ = session.write(
+        "printf '\\033]8;;https://example.com/reset\\007\\033[1mBEFORE\\033[0mAFTER\\033]8;;\\007\\n'\n"
+      )
+      resetLink <- await(session)(snapshot => cellOf(snapshot, "AFTER").flatMap(_.link).contains("https://example.com/reset"))
+      _ = report(
+        "an SGR reset inside a link keeps its URI",
+        cellOf(resetLink, "AFTER").flatMap(_.link).contains("https://example.com/reset") &&
+          cellOf(resetLink, "BEFORE").flatMap(_.link).contains("https://example.com/reset"),
+        s"BEFORE ${cellOf(resetLink, "BEFORE").flatMap(_.link)}, AFTER ${cellOf(resetLink, "AFTER").flatMap(_.link)}"
+      )
+    yield ()
+
   /** The grid's size, the scrollback, its cap, and reading both while output floods in. */
   private def sizeAndScrollbackChecks(session: HostSession, reporter: Reporter)(using
       Frame
@@ -180,6 +236,12 @@ object HostProbe:
         "and adjacent pages do not overlap",
         contiguous && pageOneNumbers.intersect(pageTwoNumbers).isEmpty,
         s"${pageOneNumbers.lastOption.getOrElse("?")} | ${pageTwoNumbers.headOption.getOrElse("?")}"
+      )
+      linkedHistory = session.history(from = 1, count = 400)
+      _ = report(
+        "a scrollback row keeps its link",
+        linkedHistory.exists(row => row.cells.exists(_.link.contains("https://example.com"))),
+        linkedHistory.flatMap(_.cells).flatMap(_.link).distinct.mkString(" ")
       )
 
       // A resize keeps the scrollback that was already there.
@@ -244,23 +306,14 @@ object HostProbe:
         engineModes.size == EngineMouseMode.values.length && engineModes.contains(MouseMode.Focus),
         engineModes.mkString(" ")
       )
-      _ = session.write("printf '\\033[?1004h'\n")
-      _ = await(session)(snapshot => snapshot.modes.mouseMode == MouseMode.Click)
-      _ = session.write("echo AFTER_FOCUS\n")
-      survived <- await(session)(snapshot => lines(snapshot).contains("AFTER_FOCUS"))
-      _ = report(
-        "focus reporting does not kill the session",
-        lines(survived).contains("AFTER_FOCUS") && session.error.isEmpty,
-        s"error ${session.error}"
-      )
-
       // Modes off again: the encoder's fallbacks have to be reported too.
       // zsh turns bracketed paste back on at every prompt, so the transition is only observable while a command still runs.
       _ = session.write(
-        "(printf '\\033[?1000l\\033[?1001l\\033[?1002l\\033[?1003l\\033[?1005l\\033[?1006l\\033[?2004l'; sleep 2)\n"
+        "(printf '\\033[?1000l\\033[?1001l\\033[?1002l\\033[?1003l\\033[?1004l\\033[?1005l\\033[?1006l\\033[?2004l'; sleep 2)\n"
       )
       cleared <- await(session)(snapshot =>
-        snapshot.modes.mouseMode == MouseMode.Off && snapshot.modes.mouseFormat == MouseFormat.X10 && !snapshot.modes.bracketedPaste
+        snapshot.modes.mouseMode == MouseMode.Off && snapshot.modes.mouseFormat == MouseFormat.X10 && !snapshot.modes.bracketedPaste &&
+          !snapshot.modes.focusReporting
       )
       _ = report(
         "turning the modes off is reported",
@@ -282,20 +335,137 @@ object HostProbe:
       _ = report("and leaving it is reported", !restored.modes.alternateScreen, s"modes ${restored.modes}")
     yield ()
 
+  /** 1004 is tracked by the host, not by the engine's mouse-mode callback, so check it on a real shell and reset it again. */
+  private def focusModeChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
+    val report = reporter.report
+    for
+      _ = session.write("printf '\\033[?1004h'; sleep 2\n")
+      focused <- await(session)(snapshot => snapshot.modes.focusReporting)
+      _ = session.write("echo AFTER_FOCUS\n")
+      survived <- await(session)(snapshot => lines(snapshot).contains("AFTER_FOCUS"))
+      _ = report(
+        "focus reporting is reported and does not kill the session",
+        focused.modes.focusReporting && lines(survived).contains("AFTER_FOCUS") && session.error.isEmpty,
+        s"modes ${focused.modes}, error ${session.error}"
+      )
+      _ = session.write("printf '\\033[?1004l'; sleep 2\n")
+      _ <- await(session)(snapshot => !snapshot.modes.focusReporting)
+    yield ()
+
+  /** The bytes a key sends on a real PTY, in normal and application cursor mode. A raw-mode `dd` is the program that receives them, so the
+    * terminal's line discipline cannot edit or echo the sequence on the way.
+    */
+  private def keyChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
+    val report = reporter.report
+    val normalKeys = Vector(
+      KeyInput(TerminalKey.Up, KeyModifiers.none),
+      KeyInput(TerminalKey.Home, KeyModifiers.none),
+      KeyInput(TerminalKey.End, KeyModifiers.none),
+      KeyInput(TerminalKey.Insert, KeyModifiers.none),
+      KeyInput(TerminalKey.Delete, KeyModifiers.none),
+      KeyInput(TerminalKey.F1, KeyModifiers.none),
+      KeyInput(TerminalKey.Tab, KeyModifiers(shift = true, alt = false, control = false, meta = false)),
+      KeyInput(TerminalKey.Left, KeyModifiers(shift = false, alt = false, control = true, meta = false)),
+      KeyInput(TerminalKey.Left, KeyModifiers(shift = false, alt = true, control = false, meta = false))
+    )
+    val normalHex = "1b5b411b5b481b5b461b5b327e1b5b337e1b4f501b5b5a1b5b313b35441b5b313b3344"
+    val applicationKeys = Vector(
+      KeyInput(TerminalKey.Up, KeyModifiers.none),
+      KeyInput(TerminalKey.Left, KeyModifiers.none)
+    )
+    val applicationHex = "1b4f411b4f44"
+    // One encoder, reused: modified then plain. This is the regression for the engine mutating its map array in place.
+    val statefulKeys = Vector(
+      KeyInput(TerminalKey.Up, KeyModifiers(shift = true, alt = false, control = false, meta = false)),
+      KeyInput(TerminalKey.Up, KeyModifiers.none),
+      KeyInput(TerminalKey.F1, KeyModifiers(shift = true, alt = false, control = false, meta = false)),
+      KeyInput(TerminalKey.F1, KeyModifiers.none)
+    )
+    val statefulHex = "1b5b313b32411b4f411b5b313b32501b4f50"
+    for
+      _ <- await(session)(snapshot => text(snapshot).trim.nonEmpty)
+      normal <- readKeys(session, normalKeys, normalHex, applicationCursor = false, marker = "NORMAL")
+      _ = report(
+        "normal cursor mode: arrows, navigation, F1, Shift+Tab and modified arrows send xterm's bytes",
+        normal._1,
+        s"expected $normalHex; screen: ${normal._2}"
+      )
+      application <- readKeys(session, applicationKeys, applicationHex, applicationCursor = true, marker = "APP")
+      _ = report(
+        "application cursor mode (DECCKM) sends SS3 arrows",
+        application._1,
+        s"expected $applicationHex; screen: ${application._2}"
+      )
+      stateful <- readKeys(session, statefulKeys, statefulHex, applicationCursor = true, marker = "STATEFUL")
+      _ = report(
+        "a modified key does not corrupt the plain key after it",
+        stateful._1,
+        s"expected $statefulHex; screen: ${stateful._2}"
+      )
+    yield ()
+
+  /** Runs `dd` in raw mode for exactly the bytes `keys` should produce, and checks the hex `od` prints. The markers are split in the
+    * command line so the shell's echo of the command cannot satisfy the wait.
+    */
+  private def readKeys(
+      session: HostSession,
+      keys: Vector[KeyInput],
+      expectedHex: String,
+      applicationCursor: Boolean,
+      marker: String
+  )(using Frame): (Boolean, String) < (Async & Abort[Any]) =
+    val bytes = expectedHex.length / 2
+    val cursorMode = if applicationCursor then "h" else "l"
+    val ready = s"KEYS_${marker}_READY"
+    val done = s"KEYS_${marker}_DONE"
+    val command =
+      s"printf '\\033[?1$cursorMode'; stty raw -echo; printf 'KEYS_%s\\n' ${marker}_READY; " +
+        s"dd bs=1 count=$bytes 2>/dev/null | od -An -tx1 | tr -d ' \\n'; " +
+        s"printf '\\nKEYS_%s\\n' ${marker}_DONE; printf '\\033[?1l'; stty sane\n"
+    def send(remaining: List[KeyInput]): Unit < Sync =
+      remaining match
+        case head :: tail => Sync.defer(session.key(head)).andThen(send(tail))
+        case Nil          => Sync.defer(())
+    for
+      _ <- Sync.defer(session.write(command))
+      _ <- await(session)(snapshot => text(snapshot).contains(ready))
+      _ <- send(keys.toList)
+      finished <- await(session)(snapshot => text(snapshot).contains(done))
+    yield
+      val screen = finished.rows.map(rowText).mkString("\n")
+      val normalized = screen.filterNot(_.isWhitespace)
+      val afterReady = normalized.indexOf(ready) match
+        case -1 => normalized
+        case at => normalized.drop(at + ready.length)
+      val captured = afterReady.indexOf(done) match
+        case -1 => afterReady
+        case at => afterReady.take(at)
+      (captured.contains(expectedHex), captured.take(200))
+
   /** Damage: exact rows, and the parts of a frame that are not rows. */
   private def damageChecks(session: HostSession, reporter: Reporter)(using Frame): Unit < (Async & Abort[Any]) =
     val report = reporter.report
     for
       baseline <- settledSnapshot(session)
+      generationBeforeOutput = session.generation
       _ = session.write("echo DAMAGE_OK\n")
-      damaged <- await(session)(snapshot => lines(snapshot).contains("DAMAGE_OK"))
-      damage = session.damageSince(baseline)
+      _ <- await(session)(snapshot => lines(snapshot).contains("DAMAGE_OK"))
+      // Let the shell's own repaint (prompt, bracketed-paste reset) finish before taking the delta. The frame and the damage come from one
+      // `frameSince`, so later output cannot make the snapshot and the delta describe different instants.
+      _ <- settledSnapshot(session)
+      (damaged, damage) = session.frameSince(baseline)
+      generationAfterOutput = session.generation
+      _ = report(
+        "output advances the screen generation",
+        generationAfterOutput > generationBeforeOutput,
+        s"$generationBeforeOutput -> $generationAfterOutput"
+      )
       damagedRows = damage.rows.map(_.row).toSet
       _ = report("damage lists the rows that changed", damage.rows.nonEmpty, s"${damage.rows.size} rows")
       _ = report(
         "and exactly those",
-        exactRows(baseline, damaged, damage) && damagedRows.size < baseline.size.rows,
-        s"damaged ${damagedRows.toVector.sorted.mkString(",")} of ${baseline.size.rows}"
+        exactRows(baseline, damaged, damage),
+        s"size ${baseline.size} -> ${damaged.size}, damaged ${damagedRows.toVector.sorted.mkString(",")}, changed ${changedRows(baseline, damaged).toVector.sorted.mkString(",")}"
       )
       _ = report("the damaged row holds the new text", damage.rows.exists(change => rowText(change.cells).contains("DAMAGE_OK")), "")
       _ = report(
@@ -306,6 +476,12 @@ object HostProbe:
       settled = session.snapshot()
       idle = session.damageSince(settled)
       _ = report("and nothing when nothing changed", idle.isEmpty, s"${idle.rows.size} rows")
+      quiet <- Async.timeout(10.seconds)(quietGeneration)
+      _ = report(
+        "and a quiet screen does not advance the screen generation",
+        quiet._1 == quiet._2,
+        s"${quiet._1} -> ${quiet._2}"
+      )
 
       // A cursor-only change: no text at all, so the rows must not be damaged and the cursor must be.
       cursorBaseline <- cursorOnlyBaseline(session)
@@ -357,6 +533,21 @@ object HostProbe:
         s"${grownDelta.rows.size} rows of ${taller.rows}, applying it gives ${grownFrame.rows.size} rows: ${grownDelta.applyTo(sameWidthBaseline) == grownFrame}"
       )
     yield ()
+
+  /** A shell provably blocked in a foreground read, so the measured window cannot contain a prompt redraw or job notification. */
+  private def quietGeneration(using Frame): (Long, Long) < (Async & Abort[Any]) =
+    Scope.run {
+      for
+        temporary <- HostSession.open(SessionId("quiet"), index = 0, Paths.get(sys.props("user.dir")), HostSession.loginShell)
+        _ <- await(temporary)(snapshot => text(snapshot).trim.nonEmpty)
+        _ <- Sync.defer(temporary.write("read quiet\n"))
+        _ <- await(temporary)(snapshot => text(snapshot).contains("read quiet"))
+        before = temporary.generation
+        _ <- Async.sleep(200.millis)
+        after = temporary.generation
+        _ <- Sync.defer(temporary.close())
+      yield (before, after)
+    }
 
   /** Two sessions at once, and a session closed by hand. */
   private def isolationAndTeardownChecks(session: HostSession, reporter: Reporter)(using
@@ -486,8 +677,11 @@ object HostProbe:
     * whenever it likes, so this is the invariant a client depends on - not "no rows changed".
     */
   private def exactRows(before: Snapshot, after: Snapshot, damage: Damage): Boolean =
-    val changed = after.rows.zipWithIndex.collect { case (row, index) if before.rows.lift(index).forall(_ != row) => index }.toSet
-    changed == damage.rows.map(_.row).toSet
+    changedRows(before, after) == damage.rows.map(_.row).toSet
+
+  /** The row indexes whose cells differ between two frames. */
+  private def changedRows(before: Snapshot, after: Snapshot): Set[Int] =
+    after.rows.zipWithIndex.collect { case (row, index) if before.rows.lift(index).forall(_ != row) => index }.toSet
 
   /** The first frame that survives a moment without changing: what a baseline has to be for a delta to mean anything. */
   private def settledSnapshot(session: HostSession)(using Frame): Snapshot < Async =
